@@ -118,6 +118,22 @@ In those cases, repeat the first-time install with the newer AppImage.
 
 ---
 
+## Running scripts from inside the kiosk (Admin → DangerZone → System Scripts)
+
+The kiosk has a built-in button to run these scripts without SSH. Useful when an operator is on-site and needs to verify the install:
+
+|Button|Script|Risk|When to use|
+|------|------|----|-----------|
+|**RUN DIAGNOSTICS**|`check-raspberry.sh`|None (read-only)|Anytime, even mid-fueling. Verifies BLE, UART, I2C, USB, libraries, AppImage state.|
+|**RE-VERIFY CONFIG**|`setup-system.sh`|Low (sudo, idempotent)|After OS update, or to re-apply UART/I2C/SPI overlays + udev rules.|
+|**REINSTALL FROM SCRATCH**|`install-raspberry.sh`|High (kills kiosk)|Only when nobody is fueling. Reinstalls from current AppImage. **DB is preserved** (lives in `~/.config/`, untouched).|
+
+The scripts are **downloaded on the fly** from the public repo `Flowmastercontrols/fuel-manager-scripts` (always the latest version on `main`). No need to update the kiosk to get script updates.
+
+`setup-system.sh` and `install-raspberry.sh` are run via `sudo` without password thanks to the entry in `/etc/sudoers.d/fuelmanager` configured by `install-raspberry.sh`. Scope is strictly limited to `/tmp/fuel-setup-system.sh` and `/tmp/fuel-install-raspberry.sh *`.
+
+---
+
 ## Auto-start on boot
 
 `install-raspberry.sh` configures auto-start by creating `~/.config/autostart/fuelmanager.desktop`. The kiosk launches when the user logs into the desktop.
