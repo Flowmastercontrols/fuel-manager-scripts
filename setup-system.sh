@@ -6,7 +6,7 @@
 # Run this ONCE on a fresh Pi, then reboot.
 #
 # After this, install the kiosk app via:
-#     sudo apt install ./FuelManager-X.X.X.deb
+#     sudo bash install-raspberry.sh path/to/FuelManager-X.X.X-ENV.AppImage
 #
 # What this script does:
 #   1. Enables I2C, SPI and UART via raspi-config
@@ -14,10 +14,10 @@
 #   3. Adds the user to required hardware groups (dialout, gpio, i2c, etc.)
 #   4. Installs udev rules for the USB HID card reader
 #
-# What it does NOT do (handled by the .deb package):
-#   • Installing the FuelManager app
-#   • Installing runtime libraries (declared as deb dependencies)
-#   • setcap on the binary
+# What it does NOT do (handled by install-raspberry.sh):
+#   • Installing the FuelManager app (extracts the AppImage to /opt/FuelManager)
+#   • Installing runtime libraries (apt deps: libusb, libsqlite3, libgpiod2, ...)
+#   • setcap cap_net_raw on the inner Electron binary (required for BLE)
 #   • Bluetooth service enable
 #   • /dev/shm permissions
 # =============================================================================
@@ -44,17 +44,6 @@ fail()  { echo -e "${RED}✗${NC}  $*"; exit 1; }
 TARGET_USER="${SUDO_USER:-$USER}"
 
 log "FuelManager — system setup for user '$TARGET_USER'"
-
-# ───────────────────────────────────────────────────────────────────────────
-# 0. Install gdebi (graphical .deb installer — enables double-click install)
-# ───────────────────────────────────────────────────────────────────────────
-
-if ! command -v gdebi >/dev/null 2>&1; then
-  log "Installing gdebi (double-click .deb installer)..."
-  apt-get update -qq >/dev/null 2>&1 || true
-  apt-get install -y -qq gdebi > /dev/null 2>&1 || warn "gdebi install failed (double-click .deb won't work, but 'apt install' still does)"
-  ok "gdebi installed — future .deb files can be installed by double-click"
-fi
 
 # ───────────────────────────────────────────────────────────────────────────
 # 1. Enable kernel interfaces
@@ -148,8 +137,8 @@ echo
 echo -e "  1. ${YELLOW}REBOOT${NC} to apply UART overlays and kernel changes:"
 echo "       sudo reboot"
 echo
-echo "  2. After reboot, install the FuelManager app:"
-echo "       sudo apt install ./FuelManager-X.X.X.deb"
+echo "  2. After reboot, install the FuelManager kiosk app:"
+echo "       sudo bash install-raspberry.sh path/to/FuelManager-X.X.X-ENV.AppImage"
 echo
 echo "  3. Verify everything is working:"
 echo "       bash check-raspberry.sh"
