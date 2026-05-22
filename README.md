@@ -106,7 +106,7 @@ La auth key se genera en `https://login.tailscale.com/admin/settings/keys` (Reus
 12. Crea un `.desktop` para el menú de aplicaciones.
 13. Habilita el auto-start en login del usuario actual (XDG autostart).
 14. **(Solo si hay auth key Tailscale)** Instala el agente Tailscale y une el kiosko al tailnet con hostname `kiosk-<6-últimos-hex-MAC-eth0>` y tag `tag:kiosk`. Es **idempotente**: si ya estaba unido, se salta. Persiste la auth key en `/etc/flowmaster/tailscale.key` (0600 root:root) para futuras re-ejecuciones. Tras el primer bulk-download del Fuelmanager, el kiosko se autorenombra a `kiosk-<fm-code>`.
-15. **(Solo si Tailscale se unió correctamente)** Instala `wayvnc` y configura un VNC server sobre la sesión Wayfire del usuario. Genera password aleatoria de 16 chars (o reutiliza la persistida en `/etc/flowmaster/wayvnc-password`), TLS cert/key autofirmados, y XDG autostart. Listen en `0.0.0.0:5900` — protegido por password VNC + ACL Tailscale.
+15. **(Solo si Tailscale se unió correctamente)** Asegura que el `wayvnc` nativo del Pi OS está habilitado (`raspi-config nonint do_vnc 0`). No instalamos nada paralelo — Pi OS ya gestiona wayvnc con sus systemd services (`wayvnc.service` + `wayvnc-control.service`), auth PAM y TLS cert auto-generado. Limpia ficheros residuales de versiones anteriores del script que sí montaban un wayvnc propio.
 
 Takes about 1-2 minutes the first time.
 
@@ -166,36 +166,53 @@ Tailscale SSH autentica por identidad de tailnet — **no pide password local** 
 
 ### Conexión VNC (ver/manejar pantalla del kiosko)
 
-El kiosko expone wayvnc en el puerto 5900 con auth username + password + TLS.
+El kiosko expone el wayvnc nativo del Pi OS en el puerto 5900 con auth **PAM + TLS**. Pi OS lo configura solo — nosotros no gestionamos ni passwords VNC separadas ni certificados a mano.
+
+**Cómo funciona la autenticación:**
+
+- Pi OS usa el módulo PAM `pam_allow_desktopuser` que SOLO permite conectar al **usuario que tiene activa la sesión gráfica** (el del autologin de Wayfire).
+- Eso significa que las credenciales VNC son las **del sistema Linux** de ese usuario.
 
 **Credenciales:**
 
-- **Hostname:** `kiosk-<hostname>` (visible en panel Tailscale, ej. `kiosk-63cdb5`)
-- **Puerto:** `5900`
-- **Usuario:** `fuelmanager`
-- **Password:** se muestra al final del install. Para recuperarla más tarde, conéctate por SSH al kiosko y ejecuta `sudo cat /etc/flowmaster/wayvnc-password`.
+- **Hostname:** `kiosk-<hostname>` (visible en panel Tailscale, ej. `kiosk-63cdb5`).
+- **Puerto:** `5900`.
+- **Username:** el usuario con autologin del kiosko:
+  - **Producción** (kioskos flasheados con el imager FuelManager): `fuelmanager`.
+  - **Desarrollo** (Pi flasheado con un usuario distinto, ej. `lucas`, `pi`, `admin`): ese mismo usuario.
+  - Si no sabes cuál: en el kiosko, `loginctl list-sessions` te muestra qué UID tiene `seat0` y qué usuario lo posee.
+- **Password:** la **password Linux** de ese usuario. La misma que usas para `sudo`. NO hay password VNC separada.
 
-#### Desde Mac (cliente nativo, no requiere instalar nada)
+> **Importante**: si intentas conectar como un usuario que no es el del autologin, recibirás un fallo con mensaje `pam_allow_desktopuser ... another user is already using the desktop`. Es comportamiento esperado.
+
+#### Desde Mac
+
+**No uses el cliente nativo de Screen Sharing** — da problemas con el TLS autofirmado de Pi OS y mensajes de error poco útiles. Usa **TigerVNC**:
 
 ```bash
-open vnc://kiosk-<hostname>:5900
+# Instalación (una sola vez):
+arch -arm64 brew install --cask tigervnc-viewer
+
+# Conexión:
+open -a TigerVNC
+# En el diálogo "VNC server:" escribe → kiosk-<hostname>:5900
 ```
 
-O en Finder: `Cmd+K` → `vnc://kiosk-<hostname>:5900` → Connect. Te pide usuario y password. Acepta el certificado autofirmado la primera vez.
+Acepta el certificado autofirmado la primera vez. Mete username (`fuelmanager` o el que tenga autologin) + password Linux.
 
-Si el cliente nativo de macOS no acepta el certificado autofirmado, usa **TigerVNC Viewer** ([tigervnc.org](https://tigervnc.org)) — gratis, open source, soporta TLS+password sin quejarse.
+> **Truco**: NO uses `open vnc://kiosk-...:5900` desde Mac. macOS intercepta el esquema `vnc://` y lo abre con Screen Sharing.app en vez de TigerVNC. Para que vaya a TigerVNC, abre la app sin URL (`open -a TigerVNC`) y mete el server manualmente.
 
 #### Desde Windows
 
 Recomendado: **TigerVNC Viewer**.
 
-1. Descarga el instalador desde [https://tigervnc.org](https://tigervnc.org) (`vncviewer64-X.X.X.exe`).
-2. Lánzalo (no requiere instalación).
+1. Descarga el `.exe` desde [https://tigervnc.org](https://tigervnc.org) (`vncviewer64-X.X.X.exe` — no requiere instalación, es un binario portable).
+2. Lánzalo.
 3. **VNC server:** `kiosk-<hostname>:5900` → Connect.
 4. Acepta el certificado autofirmado (Continue).
-5. Introduce usuario `fuelmanager` + password.
+5. Introduce username + password Linux del usuario con autologin.
 
-Alternativa: **RealVNC Viewer** ([realvnc.com/download/viewer](https://www.realvnc.com/download/viewer/)) — instalador Windows, gratis para uso personal/no comercial.
+Alternativa: **RealVNC Viewer** ([realvnc.com/connect/download/viewer](https://www.realvnc.com/connect/download/viewer/)) — instalador Windows estándar.
 
 #### Desde Linux
 
@@ -207,10 +224,10 @@ vncviewer kiosk-<hostname>:5900
 
 ### Problemas comunes
 
-- **"Connection refused"**: el kiosko aún no ha entrado en sesión Wayfire (no hay sesión gráfica activa = no hay nada que capturar). Espera al login automático o ejecuta el kiosko desde una sesión.
-- **"Authentication failed"**: revisa que el password sea el correcto (`sudo cat /etc/flowmaster/wayvnc-password` en el Pi).
-- **"Certificate not trusted"**: es esperado, el cert es autofirmado. Acepta y continúa — el cifrado sigue funcionando, simplemente el cliente no puede verificar la cadena de confianza. Para clientes que se nieguen, usa TigerVNC.
-- **El kiosko aparece en Tailscale pero no responde a SSH/VNC**: comprueba el estado del daemon desde una consola local del Pi (`tailscale status`, `pgrep wayvnc`).
+- **"Invalid username or password" / `pam_allow_desktopuser ... another user is already using the desktop`**: estás intentando entrar como un usuario que NO es el del autologin gráfico. Cambia al usuario que tiene la sesión Wayfire (`loginctl list-sessions` te lo dice).
+- **"Connection refused"** / **"Operation timed out"**: el kiosko aún no ha entrado en sesión Wayfire (sin sesión gráfica activa, no hay nada que capturar). Espera al autologin o haz reboot. Comprueba en el Pi: `sudo systemctl status wayvnc.service`.
+- **"Certificate not trusted"**: el cert es autofirmado, es normal. Acepta y continúa. Si tu cliente se niega rotundamente, usa TigerVNC que es tolerante.
+- **El kiosko aparece en Tailscale pero el VNC no responde**: verifica que `wayvnc.service` está activo: `ssh <user>@kiosk-... "sudo systemctl status wayvnc"`. Si no lo está: `sudo systemctl enable --now wayvnc.service`.
 
 ---
 

@@ -835,119 +835,84 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
-# 9. wayvnc — ver pantalla del kiosko remotamente (encima de Tailscale)
+# 9. VNC remoto (wayvnc del Pi OS — vía Tailscale)
 # -----------------------------------------------------------------------------
-# Solo se monta si Tailscale se unió correctamente. Sin Tailscale, el VNC
-# quedaría expuesto en LAN sin protección de red — no nos compensa.
+# Pi OS Bookworm trae integración nativa de wayvnc, mejor que cualquier setup
+# manual:
+#   - Systemd services `wayvnc.service` + `wayvnc-control.service` ya gestionan
+#     el ciclo de vida y permiten cambiar entre sesiones de usuario en vivo.
+#   - Auth vía PAM con módulo Pi OS-specific `pam_allow_desktopuser`: solo el
+#     usuario que tiene activa la sesión gráfica puede conectarse por VNC. Eso
+#     significa:
+#         username = usuario con autologin (típicamente `fuelmanager` en prod,
+#                    o `lucas`/`pi` en Pi de desarrollo).
+#         password = la password Linux de ese usuario (la misma de `sudo`).
+#     No hay password VNC separada. Una credencial menos que gestionar.
+#   - TLS cert/key auto-generados por Pi OS en /etc/wayvnc/ al primer arranque.
+#   - Listen en `[::]:5900` (IPv4 + IPv6).
 #
-# Stack:
-#   - wayvnc captura la sesión Wayfire del usuario y la sirve como VNC.
-#   - Se ejecuta como TARGET_USER (no como root) — necesita el socket Wayland.
-#   - Autostart vía XDG autostart del propio usuario (mismo patrón que el
-#     launcher del kiosko).
-#   - Auth: username (`fuelmanager`) + password (auto-generada o reutilizada).
-#     La password se guarda en /etc/flowmaster/wayvnc-password (root, 0600)
-#     y se replica al ~/.config/wayvnc/config del TARGET_USER.
-#   - Listen en 0.0.0.0:5900. En LAN del cliente queda expuesta pero
-#     protegida por password. Para tightening (bind solo a tailscale0)
-#     vendrá iptables en v2.
+# Lo único que tenemos que hacer en el install es asegurar que esos servicios
+# están habilitados (idempotente — raspi-config no se queja si ya lo están).
 #
-# Conexión desde Mac (una vez añadido tcp:5900 al ACL Tailscale):
-#   open vnc://kiosk-<hostname>:5900
+# Solo lo activamos si Tailscale se unió correctamente. Sin Tailscale, el VNC
+# quedaría expuesto en LAN sin la protección de red del tailnet.
+#
+# Conexión desde cliente (Mac/Windows/Linux con Tailscale conectado):
+#   - Cliente: TigerVNC, RealVNC Viewer, o similar (NO macOS Screen Sharing —
+#     puede dar problemas con TLS autofirmado).
+#   - Server: kiosk-<hostname>:5900
+#   - Username: usuario con autologin del kiosko.
+#   - Password: password Linux de ese usuario.
 # ───────────────────────────────────────────────────────────────────────────
 
 if [[ ${TS_JOIN_OK:-0} -eq 1 ]]; then
-  log "Configurando wayvnc (acceso remoto a pantalla)..."
+  log "Asegurando que el wayvnc de Pi OS está habilitado..."
 
-  # 9.1 — Instalar wayvnc
-  if ! command -v wayvnc >/dev/null 2>&1; then
-    log "Instalando wayvnc..."
-    if apt-get install -y -qq wayvnc >/dev/null 2>&1; then
-      ok "wayvnc instalado"
+  # 9.1 — Habilitar wayvnc vía raspi-config (idempotente)
+  if command -v raspi-config >/dev/null 2>&1; then
+    if raspi-config nonint do_vnc 0 >/dev/null 2>&1; then
+      ok "wayvnc del Pi OS habilitado (raspi-config nonint do_vnc 0)"
     else
-      warn "Falló apt-get install wayvnc — omitiendo configuración VNC"
-      WAYVNC_SKIP=1
+      warn "raspi-config nonint do_vnc 0 falló — comprueba a mano si VNC está activo"
     fi
   else
-    ok "wayvnc ya instalado"
+    warn "raspi-config no encontrado — no se puede habilitar wayvnc automáticamente"
   fi
 
-  if [[ ${WAYVNC_SKIP:-0} -eq 0 ]]; then
-    # 9.2 — Resolver password VNC (reusar la persistida o generar una nueva)
-    WAYVNC_PASSWORD_FILE="/etc/flowmaster/wayvnc-password"
-    WAYVNC_PASSWORD=""
-    if [[ -f "$WAYVNC_PASSWORD_FILE" ]]; then
-      WAYVNC_PASSWORD=$(tr -d '[:space:]' < "$WAYVNC_PASSWORD_FILE")
-      if [[ -n "$WAYVNC_PASSWORD" ]]; then
-        ok "Password VNC reutilizada de $WAYVNC_PASSWORD_FILE"
-      fi
-    fi
-    if [[ -z "$WAYVNC_PASSWORD" ]]; then
-      # Password fuerte de 16 chars, solo caracteres URL-safe (sin /, +, =)
-      WAYVNC_PASSWORD=$(openssl rand -base64 24 | tr -d '+/=' | cut -c1-16)
-      mkdir -p "$(dirname "$WAYVNC_PASSWORD_FILE")"
-      chmod 700 "$(dirname "$WAYVNC_PASSWORD_FILE")"
-      printf '%s\n' "$WAYVNC_PASSWORD" > "$WAYVNC_PASSWORD_FILE"
-      chmod 600 "$WAYVNC_PASSWORD_FILE"
-      chown root:root "$WAYVNC_PASSWORD_FILE"
-      ok "Password VNC nueva generada y persistida en $WAYVNC_PASSWORD_FILE"
-    fi
+  # 9.2 — Estado actual del servicio (informativo)
+  if systemctl is-active --quiet wayvnc.service 2>/dev/null; then
+    ok "Servicio wayvnc.service: activo"
+  else
+    warn "Servicio wayvnc.service NO está activo — revisa: sudo systemctl status wayvnc"
+  fi
 
-    # 9.3 — Generar TLS cert/key autofirmado para wayvnc (necesario para
-    #       la mayoría de clientes modernos incluido macOS Screen Sharing).
-    WAYVNC_CONFIG_DIR="/home/$TARGET_USER/.config/wayvnc"
-    WAYVNC_KEY="$WAYVNC_CONFIG_DIR/tls_key.pem"
-    WAYVNC_CERT="$WAYVNC_CONFIG_DIR/tls_cert.pem"
-    mkdir -p "$WAYVNC_CONFIG_DIR"
-    if [[ ! -f "$WAYVNC_KEY" || ! -f "$WAYVNC_CERT" ]]; then
-      log "Generando certificado TLS autofirmado para wayvnc..."
-      openssl req -x509 -newkey rsa:2048 -nodes \
-        -keyout "$WAYVNC_KEY" \
-        -out "$WAYVNC_CERT" \
-        -subj "/CN=kiosk-${TS_MAC_SUFFIX:-unknown}" \
-        -days 3650 \
-        >/dev/null 2>&1
-      ok "TLS cert/key generados en $WAYVNC_CONFIG_DIR"
-    else
-      ok "TLS cert/key ya presentes en $WAYVNC_CONFIG_DIR"
+  # 9.3 — Limpieza de ficheros residuales de versiones anteriores del instalador
+  #       (cuando intentamos montar wayvnc paralelo a Pi OS — ya no aporta nada).
+  CLEANUP_FILES=(
+    "/etc/flowmaster/wayvnc-password"
+    "/home/$TARGET_USER/.config/wayvnc/config"
+    "/home/$TARGET_USER/.config/wayvnc/tls_key.pem"
+    "/home/$TARGET_USER/.config/wayvnc/tls_cert.pem"
+    "/home/$TARGET_USER/.config/autostart/wayvnc.desktop"
+  )
+  CLEANED=0
+  for f in "${CLEANUP_FILES[@]}"; do
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      CLEANED=1
     fi
-
-    # 9.4 — Escribir config wayvnc
-    WAYVNC_CONFIG="$WAYVNC_CONFIG_DIR/config"
-    cat > "$WAYVNC_CONFIG" <<EOF
-address=0.0.0.0
-port=5900
-enable_auth=true
-username=fuelmanager
-password=$WAYVNC_PASSWORD
-private_key_file=$WAYVNC_KEY
-certificate_file=$WAYVNC_CERT
-EOF
-    chmod 600 "$WAYVNC_CONFIG"
-    chown -R "$TARGET_USER":"$TARGET_USER" "$WAYVNC_CONFIG_DIR"
-    ok "Config wayvnc creada: $WAYVNC_CONFIG"
-
-    # 9.5 — Autostart XDG: wayvnc arranca con la sesión Wayfire del usuario.
-    #       wayvnc lee config de ~/.config/wayvnc/config automáticamente.
-    WAYVNC_AUTOSTART_DIR="/home/$TARGET_USER/.config/autostart"
-    WAYVNC_AUTOSTART="$WAYVNC_AUTOSTART_DIR/wayvnc.desktop"
-    mkdir -p "$WAYVNC_AUTOSTART_DIR"
-    cat > "$WAYVNC_AUTOSTART" <<'EOF'
-[Desktop Entry]
-Name=WayVNC
-Comment=VNC server para acceso remoto a la pantalla del kiosko
-Exec=wayvnc
-Type=Application
-Terminal=false
-X-GNOME-Autostart-enabled=true
-EOF
-    chown -R "$TARGET_USER":"$TARGET_USER" "$WAYVNC_AUTOSTART_DIR"
-    ok "Autostart wayvnc: $WAYVNC_AUTOSTART"
-    log "wayvnc arrancará la próxima vez que '$TARGET_USER' entre en sesión Wayfire."
-    log "Para arrancarlo ahora sin esperar al reboot:  pkill wayvnc 2>/dev/null; nohup wayvnc >/dev/null 2>&1 &"
+  done
+  # Si el directorio ~/.config/wayvnc queda vacío, lo borramos también
+  if [[ -d "/home/$TARGET_USER/.config/wayvnc" ]] && \
+     [[ -z "$(ls -A "/home/$TARGET_USER/.config/wayvnc" 2>/dev/null)" ]]; then
+    rmdir "/home/$TARGET_USER/.config/wayvnc"
+    CLEANED=1
+  fi
+  if [[ $CLEANED -eq 1 ]]; then
+    ok "Limpieza de ficheros residuales del wayvnc paralelo anterior"
   fi
 else
-  log "wayvnc OMITIDO — requiere Tailscale activo (sin tailnet no hay protección de red para el VNC)"
+  log "VNC OMITIDO — requiere Tailscale activo (sin tailnet no hay protección de red)"
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -1033,14 +998,14 @@ if command -v tailscale >/dev/null 2>&1; then
     | sed -E 's/.*"HostName":[[:space:]]*"([^"]*)".*/\1/')
   if [[ -n "$TS_FINAL_IP" ]]; then
     echo -e "  ${BLUE}Tailscale${NC}: ${TS_FINAL_HOSTNAME:-?}  (IP: $TS_FINAL_IP)"
-    echo "  SSH desde soporte:  ssh fuelmanager@${TS_FINAL_HOSTNAME:-$TS_FINAL_IP}"
-    if command -v wayvnc >/dev/null 2>&1 && [[ -f /etc/flowmaster/wayvnc-password ]]; then
-      WAYVNC_PASS_OUT=$(tr -d '[:space:]' < /etc/flowmaster/wayvnc-password)
+    echo "  SSH desde soporte:  ssh <usuario>@${TS_FINAL_HOSTNAME:-$TS_FINAL_IP}"
+    if systemctl is-active --quiet wayvnc.service 2>/dev/null; then
       echo
       echo -e "  ${BLUE}VNC (pantalla)${NC}: vnc://${TS_FINAL_HOSTNAME:-$TS_FINAL_IP}:5900"
-      echo "    Usuario:  fuelmanager"
-      echo "    Password: $WAYVNC_PASS_OUT"
-      echo "    (Para recuperarla luego: sudo cat /etc/flowmaster/wayvnc-password)"
+      echo "    Cliente recomendado: TigerVNC, RealVNC Viewer (NO macOS Screen Sharing)."
+      echo "    Username = el usuario con autologin gráfico (ej. 'fuelmanager' en"
+      echo "    producción o '$TARGET_USER' en este Pi). Password = la del sistema"
+      echo "    Linux de ese usuario."
     fi
     echo
   fi
