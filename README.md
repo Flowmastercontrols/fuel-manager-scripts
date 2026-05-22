@@ -47,26 +47,66 @@ Then SSH into the Pi and `cd` into the folder.
 
 ### Step 2 — Run the installer
 
+#### Sinopsis
+
+```text
+sudo [TAILSCALE_AUTHKEY=tskey-auth-...] \
+  bash install-raspberry.sh <APPIMAGE_PATH> [TAILSCALE_AUTHKEY]
+```
+
+**Parámetros:**
+
+- **`<APPIMAGE_PATH>`** *(argumento posicional `$1`, **obligatorio**)* — Ruta al `.AppImage` del FuelManager a instalar. Ejemplo: `release/build/FuelManager-1.9.36-alpha.2-FEATURES.AppImage`.
+- **`[TAILSCALE_AUTHKEY]`** *(argumento posicional `$2`, opcional)* — Auth key Tailscale (formato `tskey-auth-...`). Si no se pasa aquí, se busca en otras fuentes (ver más abajo).
+- **`TAILSCALE_AUTHKEY`** *(variable de entorno, opcional)* — Misma key Tailscale. Prevalece sobre `$2` si ambas están presentes.
+
+#### Ejemplo mínimo (sin acceso remoto)
+
 ```bash
 sudo bash install-raspberry.sh ./FuelManager-X.X.X-ENV.AppImage
 ```
 
-Replace `X.X.X-ENV` with the actual filename (e.g. `1.9.36-alpha.2-FEATURES`).
+#### Ejemplo con acceso remoto
 
-The script does everything in one go:
+```bash
+# Variante A — segundo argumento posicional
+sudo bash install-raspberry.sh ./FuelManager-X.X.X-ENV.AppImage tskey-auth-xxxxx
 
-1. Installs system runtime libraries (libusb, libsqlite3, libbluetooth3, libgpiod2, libfuse2, etc).
-2. Enables I2C, SPI and UART kernel interfaces.
-3. Adds UART overlays to `/boot/firmware/config.txt`.
-4. Adds your user to the required groups (`dialout`, `gpio`, `i2c`, `input`, `video`, etc).
-5. Installs udev rules for the USB HID card reader.
-6. Enables and configures the Bluetooth service for BLE peripheral mode.
-7. Fixes `/dev/shm` permissions for the Chromium renderer.
-8. Copies the AppImage to `~/.local/share/FuelManager/` (writable location, required by electron-updater).
-9. Applies BLE capabilities (`setcap cap_net_raw,cap_net_admin+eip`) to the AppImage.
-10. Creates the `/usr/local/bin/fuelmanager` launcher.
-11. Creates a `.desktop` menu entry.
-12. Enables auto-start on user login (XDG autostart).
+# Variante B — variable de entorno (útil para scripting / CI)
+sudo TAILSCALE_AUTHKEY=tskey-auth-xxxxx bash install-raspberry.sh ./FuelManager-X.X.X-ENV.AppImage
+```
+
+#### Fuentes desde las que se resuelve la auth key Tailscale (orden de prioridad)
+
+El script intenta cada fuente en este orden y se queda con la **primera** que tenga valor:
+
+1. Variable de entorno `TAILSCALE_AUTHKEY`.
+2. Segundo argumento posicional del script (`$2`).
+3. Fichero `scripts/tailscale.key` junto al instalador (útil en desarrollo local; está en `.gitignore`).
+4. Fichero `/etc/flowmaster/tailscale.key` — **persistido automáticamente** tras un install exitoso. Re-ejecuciones del script (incluido desde DangerZone) la encuentran sin que tengas que aportarla otra vez.
+5. **Prompt interactivo silencioso** — solo si el script corre en TTY y no se encontró la key en las fuentes anteriores. Pegas la key (no se muestra en pantalla) o pulsas Enter para omitir Tailscale.
+
+Si ninguna fuente proporciona la key **y** no hay TTY (ej. invocación desde DangerZone), el kiosko se instala sin acceso remoto — funcional, pero sin SSH para soporte.
+
+La auth key se genera en `https://login.tailscale.com/admin/settings/keys` (Reusable ✅, Ephemeral ❌, tag `tag:kiosk` ✅, Pre-approved ✅, expiración 90 días).
+
+#### Qué hace el script
+
+1. **Crea el usuario `fuelmanager`** si no existe — le pide el password interactivamente (necesario para `sudo` desde sesiones Tailscale SSH del equipo de soporte). Si ya existe, no lo toca.
+2. Instala las librerías de runtime (libusb, libsqlite3, libbluetooth3, libgpiod2, libfuse2, etc).
+3. Habilita las interfaces de kernel I2C, SPI y UART.
+4. Añade los overlays UART a `/boot/firmware/config.txt`.
+5. Añade el usuario actual a los grupos hardware (`dialout`, `gpio`, `i2c`, `input`, `video`, etc).
+6. Instala las reglas udev del lector USB HID.
+7. Habilita y configura el servicio Bluetooth para modo BLE peripheral.
+8. Arregla permisos de `/dev/shm` (necesario para el renderer Chromium).
+9. Copia el AppImage a `~/.local/share/FuelManager/` (writable, requerido por electron-updater).
+10. Aplica `setcap cap_net_raw,cap_net_admin+eip` al binario interno extraído.
+11. Crea el launcher `/usr/local/bin/fuelmanager`.
+12. Crea un `.desktop` para el menú de aplicaciones.
+13. Habilita el auto-start en login del usuario actual (XDG autostart).
+14. **(Solo si hay auth key Tailscale)** Instala el agente Tailscale y une el kiosko al tailnet con hostname `kiosk-<6-últimos-hex-MAC-eth0>` y tag `tag:kiosk`. Es **idempotente**: si ya estaba unido, se salta. Persiste la auth key en `/etc/flowmaster/tailscale.key` (0600 root:root) para futuras re-ejecuciones. Tras el primer bulk-download del Fuelmanager, el kiosko se autorenombra a `kiosk-<fm-code>`.
+15. **(Solo si Tailscale se unió correctamente)** Instala `wayvnc` y configura un VNC server sobre la sesión Wayfire del usuario. Genera password aleatoria de 16 chars (o reutiliza la persistida en `/etc/flowmaster/wayvnc-password`), TLS cert/key autofirmados, y XDG autostart. Listen en `0.0.0.0:5900` — protegido por password VNC + ACL Tailscale.
 
 Takes about 1-2 minutes the first time.
 
@@ -97,6 +137,80 @@ fuelmanager
 ```
 
 Or click **FuelManager Kiosk** in the applications menu.
+
+---
+
+## Conectarse remotamente al kiosko (Tailscale + VNC)
+
+Una vez el kiosko está unido al tailnet y wayvnc configurado, el equipo de soporte puede conectarse desde cualquier sitio sin abrir puertos en el router del cliente.
+
+### Pre-requisitos para el cliente (Mac / Windows / Linux)
+
+1. **Tailscale** instalado en el cliente y logueado con una cuenta que esté en `group:support` del ACL de la empresa.
+   - Mac: [tailscale.com/download/mac](https://tailscale.com/download/mac) o Mac App Store.
+   - Windows: [tailscale.com/download/windows](https://tailscale.com/download/windows).
+   - Linux: `curl -fsSL https://tailscale.com/install.sh | sh`.
+2. Verificar que el kiosko aparece en la lista de devices Tailscale (admin panel o `tailscale status`).
+
+### Conexión SSH
+
+Funciona en todos los sistemas igual:
+
+```bash
+ssh <usuario>@kiosk-<hostname>
+# Ejemplo: ssh fuelmanager@kiosk-63cdb5
+# o:       ssh lucas@kiosk-63cdb5
+```
+
+Tailscale SSH autentica por identidad de tailnet — **no pide password local** para entrar. La password local solo se pide al ejecutar `sudo` dentro de la sesión.
+
+### Conexión VNC (ver/manejar pantalla del kiosko)
+
+El kiosko expone wayvnc en el puerto 5900 con auth username + password + TLS.
+
+**Credenciales:**
+
+- **Hostname:** `kiosk-<hostname>` (visible en panel Tailscale, ej. `kiosk-63cdb5`)
+- **Puerto:** `5900`
+- **Usuario:** `fuelmanager`
+- **Password:** se muestra al final del install. Para recuperarla más tarde, conéctate por SSH al kiosko y ejecuta `sudo cat /etc/flowmaster/wayvnc-password`.
+
+#### Desde Mac (cliente nativo, no requiere instalar nada)
+
+```bash
+open vnc://kiosk-<hostname>:5900
+```
+
+O en Finder: `Cmd+K` → `vnc://kiosk-<hostname>:5900` → Connect. Te pide usuario y password. Acepta el certificado autofirmado la primera vez.
+
+Si el cliente nativo de macOS no acepta el certificado autofirmado, usa **TigerVNC Viewer** ([tigervnc.org](https://tigervnc.org)) — gratis, open source, soporta TLS+password sin quejarse.
+
+#### Desde Windows
+
+Recomendado: **TigerVNC Viewer**.
+
+1. Descarga el instalador desde [https://tigervnc.org](https://tigervnc.org) (`vncviewer64-X.X.X.exe`).
+2. Lánzalo (no requiere instalación).
+3. **VNC server:** `kiosk-<hostname>:5900` → Connect.
+4. Acepta el certificado autofirmado (Continue).
+5. Introduce usuario `fuelmanager` + password.
+
+Alternativa: **RealVNC Viewer** ([realvnc.com/download/viewer](https://www.realvnc.com/download/viewer/)) — instalador Windows, gratis para uso personal/no comercial.
+
+#### Desde Linux
+
+Cualquier cliente VNC moderno: TigerVNC, Remmina, Vinagre.
+
+```bash
+vncviewer kiosk-<hostname>:5900
+```
+
+### Problemas comunes
+
+- **"Connection refused"**: el kiosko aún no ha entrado en sesión Wayfire (no hay sesión gráfica activa = no hay nada que capturar). Espera al login automático o ejecuta el kiosko desde una sesión.
+- **"Authentication failed"**: revisa que el password sea el correcto (`sudo cat /etc/flowmaster/wayvnc-password` en el Pi).
+- **"Certificate not trusted"**: es esperado, el cert es autofirmado. Acepta y continúa — el cifrado sigue funcionando, simplemente el cliente no puede verificar la cadena de confianza. Para clientes que se nieguen, usa TigerVNC.
+- **El kiosko aparece en Tailscale pero no responde a SSH/VNC**: comprueba el estado del daemon desde una consola local del Pi (`tailscale status`, `pgrep wayvnc`).
 
 ---
 

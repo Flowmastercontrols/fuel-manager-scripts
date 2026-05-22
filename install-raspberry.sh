@@ -52,6 +52,9 @@ require_root() {
 
 TARGET_USER="${SUDO_USER:-$USER}"
 APPIMAGE_PATH="${1:-}"
+TAILSCALE_AUTHKEY_ARG="${2:-}"   # opcional: segundo positional arg (puede ser una key tskey-auth-...)
+TAILSCALE_PERSISTED_KEY_PATH="/etc/flowmaster/tailscale.key"
+FUELMANAGER_USERNAME="fuelmanager"
 
 # ───────────────────────────────────────────────────────────────────────────
 # Preflight
@@ -60,6 +63,66 @@ APPIMAGE_PATH="${1:-}"
 require_root
 
 log "FuelManager Kiosk — production install (user: $TARGET_USER)"
+
+# ───────────────────────────────────────────────────────────────────────────
+# 0c. Asegurar que existe el usuario 'fuelmanager'
+# -----------------------------------------------------------------------------
+# El ACL de Tailscale autoriza SSH al kiosko sólo con `users: ["fuelmanager"]`,
+# así que el equipo de soporte SIEMPRE entra como `fuelmanager`. En la mayoría
+# de Pis recién flasheadas ese es directamente el usuario por defecto del
+# imager. Pero hay Pis (típicamente de desarrollo) donde el usuario es otro
+# (ej. `lucas`); en esos casos creamos `fuelmanager` para que la ACL siga
+# funcionando.
+#
+# Si lo creamos: lo añadimos a los grupos hardware estándar + sudo, y pedimos
+# password interactivamente. El password es necesario para que `sudo X` desde
+# una sesión Tailscale-SSH funcione (Tailscale autentica la sesión sin pass,
+# pero `sudo` sí pide pass — defensa en profundidad).
+#
+# Si NO hay TTY (ej. invocación desde DangerZone), se omite la creación con
+# un warning. Es esperable: en ese modo el kiosko ya está montado y el usuario
+# fuelmanager ya debería existir.
+# ───────────────────────────────────────────────────────────────────────────
+
+ensure_fuelmanager_user() {
+  if id "$FUELMANAGER_USERNAME" >/dev/null 2>&1; then
+    ok "Usuario '$FUELMANAGER_USERNAME' ya existe (no se toca)"
+    return 0
+  fi
+
+  if [[ ! -e /dev/tty ]]; then
+    warn "Usuario '$FUELMANAGER_USERNAME' no existe y no hay TTY — SE OMITE creación."
+    warn "  El equipo de soporte no podrá hacer SSH a este Pi hasta que se cree."
+    return 0
+  fi
+
+  log "Usuario '$FUELMANAGER_USERNAME' no existe — creándolo..."
+  useradd -m -s /bin/bash "$FUELMANAGER_USERNAME"
+
+  # Grupos hardware estándar (mismo set que para TARGET_USER más abajo) + sudo
+  for g in dialout gpio input video audio i2c spi plugdev sudo; do
+    if getent group "$g" >/dev/null 2>&1; then
+      usermod -aG "$g" "$FUELMANAGER_USERNAME"
+    fi
+  done
+  ok "Usuario '$FUELMANAGER_USERNAME' creado + añadido a grupos hardware + sudo"
+
+  echo
+  echo "════════════════════════════════════════════════════════════════"
+  echo " Configura el password para el usuario '$FUELMANAGER_USERNAME'"
+  echo "════════════════════════════════════════════════════════════════"
+  echo " Este password se pide al hacer 'sudo' desde una sesión SSH del"
+  echo " equipo de soporte. Guárdalo en tu gestor de contraseñas."
+  echo
+  if passwd "$FUELMANAGER_USERNAME" < /dev/tty; then
+    ok "Password de '$FUELMANAGER_USERNAME' establecida"
+  else
+    warn "Falló el establecimiento del password — '$FUELMANAGER_USERNAME' existe pero sin password."
+    warn "  'sudo' no funcionará para ese usuario hasta que ejecutes: sudo passwd $FUELMANAGER_USERNAME"
+  fi
+}
+
+ensure_fuelmanager_user
 
 # ───────────────────────────────────────────────────────────────────────────
 # 0a. Validar que se pasó un AppImage como argumento
@@ -578,6 +641,316 @@ EOF
 install_appimage "$APPIMAGE_PATH" || fail "Instalación del AppImage falló"
 
 # ───────────────────────────────────────────────────────────────────────────
+# 8. Tailscale (acceso remoto para soporte)
+# -----------------------------------------------------------------------------
+# Une el kiosko al tailnet de Flowmastercontrols para que el equipo de soporte
+# pueda acceder por SSH (vía Tailscale SSH) y diagnosticar incidencias.
+#
+# Comportamiento:
+#   - OPCIONAL: si no se puede obtener la auth key por ninguna vía, se salta
+#     limpio y el kiosko queda sin acceso remoto pero plenamente funcional.
+#   - IDEMPOTENTE: si tailscaled ya está corriendo y el nodo ya está unido,
+#     no se hace nada. Re-ejecutar el instalador es seguro.
+#   - HOSTNAME DETERMINÍSTICO: kiosk-<6-últimos-hex-de-MAC-eth0>. Misma
+#     Raspberry → mismo hostname inicial entre reinstalaciones. Tras el
+#     bulk-download del Fuelmanager, el propio kiosko se renombra a
+#     kiosk-<fm-code> (lo hace bulkDownloadFuelmanager.ts).
+#   - --operator=$TARGET_USER permite al usuario que corre el kiosko ejecutar
+#     `tailscale set`, `tailscale status`, etc. sin sudo. Esto habilita el
+#     rename post-bulk-download sin tener que añadir nada al sudoers.
+#
+# Cómo se obtiene la auth key (en orden de prioridad, primera fuente que tenga
+# valor gana — sirven todas, escoges la más cómoda):
+#   1) Variable de entorno TAILSCALE_AUTHKEY:
+#        sudo TAILSCALE_AUTHKEY=tskey-auth-xxxxx bash install-raspberry.sh AppImage
+#   2) Segundo argumento posicional al script:
+#        sudo bash install-raspberry.sh AppImage tskey-auth-xxxxx
+#   3) Fichero scripts/tailscale.key junto al script (útil para dev local).
+#      MUY IMPORTANTE: este path está en .gitignore.
+#   4) Fichero /etc/flowmaster/tailscale.key (persistido tras un install
+#      exitoso previo). Permite re-ejecutar el script sin volver a aportar
+#      la key.
+#   5) Prompt interactivo (si hay TTY disponible). Pega la key o pulsa Enter
+#      para omitir Tailscale.
+#
+# Tras un join exitoso, la key se persiste en /etc/flowmaster/tailscale.key
+# (modo 600, root:root) para que futuras re-ejecuciones la encuentren solas.
+# ───────────────────────────────────────────────────────────────────────────
+
+# 8.0 — Resolver la auth key recorriendo las fuentes en orden.
+resolve_tailscale_authkey() {
+  # Fuente 1: env var ya definida
+  if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then
+    log "Auth key Tailscale: variable de entorno"
+    return 0
+  fi
+
+  # Fuente 2: segundo argumento posicional
+  if [[ -n "$TAILSCALE_AUTHKEY_ARG" ]]; then
+    TAILSCALE_AUTHKEY="$TAILSCALE_AUTHKEY_ARG"
+    log "Auth key Tailscale: 2º argumento del script"
+    return 0
+  fi
+
+  # Fuente 3: scripts/tailscale.key (mismo dir del script, dev local)
+  local local_key="$SCRIPT_DIR/tailscale.key"
+  if [[ -f "$local_key" ]]; then
+    local content
+    content=$(tr -d '[:space:]' < "$local_key")
+    if [[ -n "$content" ]]; then
+      TAILSCALE_AUTHKEY="$content"
+      log "Auth key Tailscale: cargada desde $local_key"
+      return 0
+    fi
+  fi
+
+  # Fuente 4: clave persistida de un install anterior
+  if [[ -f "$TAILSCALE_PERSISTED_KEY_PATH" ]]; then
+    local persisted
+    persisted=$(tr -d '[:space:]' < "$TAILSCALE_PERSISTED_KEY_PATH")
+    if [[ -n "$persisted" ]]; then
+      TAILSCALE_AUTHKEY="$persisted"
+      log "Auth key Tailscale: cargada de $TAILSCALE_PERSISTED_KEY_PATH (persistida)"
+      return 0
+    fi
+  fi
+
+  # Fuente 5: prompt interactivo (solo si hay TTY accesible)
+  if [[ -e /dev/tty ]]; then
+    echo
+    echo "════════════════════════════════════════════════════════════════"
+    echo " Configuración de acceso remoto (Tailscale)"
+    echo "════════════════════════════════════════════════════════════════"
+    echo " Si quieres que este kiosko sea accesible por SSH remotamente vía"
+    echo " Tailscale, pega aquí la auth key (formato: tskey-auth-...)."
+    echo " Si pulsas Enter sin escribir nada, se OMITE Tailscale y el kiosko"
+    echo " queda instalado sin acceso remoto."
+    echo
+    local prompted=""
+    # Read silently (no echo de la key en pantalla) desde /dev/tty
+    if read -r -s -p " Auth key Tailscale (o Enter para omitir): " prompted < /dev/tty; then
+      echo  # newline después del prompt silencioso
+    fi
+    prompted=$(echo "$prompted" | tr -d '[:space:]')
+    if [[ -n "$prompted" ]]; then
+      TAILSCALE_AUTHKEY="$prompted"
+      log "Auth key Tailscale: introducida por prompt"
+      return 0
+    fi
+    log "Sin auth key — Tailscale OMITIDO"
+    return 1
+  fi
+
+  log "Sin auth key y sin TTY — Tailscale OMITIDO"
+  return 1
+}
+
+resolve_tailscale_authkey || true   # no fatal: continuamos sin Tailscale
+
+if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then
+  log "Configurando Tailscale (acceso remoto para soporte)..."
+
+  # 8.1 — Instalar el cliente Tailscale si no está presente
+  if ! command -v tailscale >/dev/null 2>&1; then
+    log "Instalando agente Tailscale..."
+    if ! curl -fsSL https://tailscale.com/install.sh | sh >/dev/null; then
+      warn "Falló la instalación de Tailscale — el kiosko sigue, pero sin acceso remoto"
+      TAILSCALE_AUTHKEY=""   # desactivar resto del bloque
+    else
+      ok "Agente Tailscale instalado"
+    fi
+  else
+    ok "Agente Tailscale ya presente"
+  fi
+fi
+
+if [[ -n "${TAILSCALE_AUTHKEY:-}" ]]; then
+  # 8.2 — Calcular hostname determinístico a partir de la MAC de eth0.
+  #       Fallback a wlan0 si eth0 no existe (poco común en Pi 5).
+  #       Última red de fallback: 6 hex aleatorios — perdemos idempotencia
+  #       pero no rompemos la instalación.
+  TS_MAC_IFACE="eth0"
+  if [[ ! -d "/sys/class/net/$TS_MAC_IFACE" ]]; then
+    TS_MAC_IFACE="wlan0"
+  fi
+  TS_MAC_RAW=$(cat "/sys/class/net/$TS_MAC_IFACE/address" 2>/dev/null || true)
+  if [[ -z "$TS_MAC_RAW" ]]; then
+    warn "No se pudo leer MAC de $TS_MAC_IFACE — usando sufijo aleatorio"
+    TS_MAC_SUFFIX=$(openssl rand -hex 3)
+  else
+    # Quitar los ':' y coger los 6 últimos hex
+    TS_MAC_SUFFIX=$(echo "$TS_MAC_RAW" | tr -d ':' | tail -c 7 | head -c 6)
+  fi
+  TS_INITIAL_HOSTNAME="kiosk-${TS_MAC_SUFFIX}"
+  log "Tailscale hostname inicial: $TS_INITIAL_HOSTNAME (MAC $TS_MAC_IFACE: ${TS_MAC_RAW:-unknown})"
+
+  # 8.3 — Idempotencia: ¿ya estamos unidos al tailnet?
+  TS_ALREADY_UP=0
+  if systemctl is-active --quiet tailscaled 2>/dev/null; then
+    if tailscale status --json 2>/dev/null | grep -q '"BackendState":[[:space:]]*"Running"'; then
+      TS_ALREADY_UP=1
+    fi
+  fi
+
+  TS_JOIN_OK=0
+  if [[ $TS_ALREADY_UP -eq 1 ]]; then
+    TS_CURRENT_HOSTNAME=$(tailscale status --json --self 2>/dev/null \
+      | grep -oE '"HostName":[[:space:]]*"[^"]*"' | head -1 \
+      | sed -E 's/.*"HostName":[[:space:]]*"([^"]*)".*/\1/')
+    TS_CURRENT_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+    ok "Tailscale ya unido al tailnet (hostname: ${TS_CURRENT_HOSTNAME:-?}, IP: ${TS_CURRENT_IP:-?}) — skip join"
+    TS_JOIN_OK=1
+  else
+    log "Uniendo al tailnet como $TS_INITIAL_HOSTNAME ..."
+    if tailscale up \
+        --authkey="$TAILSCALE_AUTHKEY" \
+        --hostname="$TS_INITIAL_HOSTNAME" \
+        --advertise-tags=tag:kiosk \
+        --ssh \
+        --operator="$TARGET_USER" \
+        --accept-routes=false; then
+      TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+      ok "Tailscale unido al tailnet como $TS_INITIAL_HOSTNAME (IP: ${TS_IP:-?})"
+      TS_JOIN_OK=1
+    else
+      warn "tailscale up falló — revisar la auth key (¿caducada? ¿tag:kiosk no autorizado?)"
+    fi
+  fi
+
+  # 8.4 — Persistir la key solo si el join fue OK. Así re-ejecuciones del
+  #       script (incluido vía DangerZone) no necesitan la key.
+  if [[ $TS_JOIN_OK -eq 1 ]]; then
+    mkdir -p "$(dirname "$TAILSCALE_PERSISTED_KEY_PATH")"
+    chmod 700 "$(dirname "$TAILSCALE_PERSISTED_KEY_PATH")"
+    if [[ ! -f "$TAILSCALE_PERSISTED_KEY_PATH" ]] || \
+       [[ "$(tr -d '[:space:]' < "$TAILSCALE_PERSISTED_KEY_PATH")" != "$TAILSCALE_AUTHKEY" ]]; then
+      printf '%s\n' "$TAILSCALE_AUTHKEY" > "$TAILSCALE_PERSISTED_KEY_PATH"
+      chmod 600 "$TAILSCALE_PERSISTED_KEY_PATH"
+      chown root:root "$TAILSCALE_PERSISTED_KEY_PATH"
+      ok "Auth key persistida en $TAILSCALE_PERSISTED_KEY_PATH (root, 0600)"
+    fi
+  fi
+else
+  log "Sin auth key Tailscale — integración OMITIDA (kiosko sin acceso remoto)"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# 9. wayvnc — ver pantalla del kiosko remotamente (encima de Tailscale)
+# -----------------------------------------------------------------------------
+# Solo se monta si Tailscale se unió correctamente. Sin Tailscale, el VNC
+# quedaría expuesto en LAN sin protección de red — no nos compensa.
+#
+# Stack:
+#   - wayvnc captura la sesión Wayfire del usuario y la sirve como VNC.
+#   - Se ejecuta como TARGET_USER (no como root) — necesita el socket Wayland.
+#   - Autostart vía XDG autostart del propio usuario (mismo patrón que el
+#     launcher del kiosko).
+#   - Auth: username (`fuelmanager`) + password (auto-generada o reutilizada).
+#     La password se guarda en /etc/flowmaster/wayvnc-password (root, 0600)
+#     y se replica al ~/.config/wayvnc/config del TARGET_USER.
+#   - Listen en 0.0.0.0:5900. En LAN del cliente queda expuesta pero
+#     protegida por password. Para tightening (bind solo a tailscale0)
+#     vendrá iptables en v2.
+#
+# Conexión desde Mac (una vez añadido tcp:5900 al ACL Tailscale):
+#   open vnc://kiosk-<hostname>:5900
+# ───────────────────────────────────────────────────────────────────────────
+
+if [[ ${TS_JOIN_OK:-0} -eq 1 ]]; then
+  log "Configurando wayvnc (acceso remoto a pantalla)..."
+
+  # 9.1 — Instalar wayvnc
+  if ! command -v wayvnc >/dev/null 2>&1; then
+    log "Instalando wayvnc..."
+    if apt-get install -y -qq wayvnc >/dev/null 2>&1; then
+      ok "wayvnc instalado"
+    else
+      warn "Falló apt-get install wayvnc — omitiendo configuración VNC"
+      WAYVNC_SKIP=1
+    fi
+  else
+    ok "wayvnc ya instalado"
+  fi
+
+  if [[ ${WAYVNC_SKIP:-0} -eq 0 ]]; then
+    # 9.2 — Resolver password VNC (reusar la persistida o generar una nueva)
+    WAYVNC_PASSWORD_FILE="/etc/flowmaster/wayvnc-password"
+    WAYVNC_PASSWORD=""
+    if [[ -f "$WAYVNC_PASSWORD_FILE" ]]; then
+      WAYVNC_PASSWORD=$(tr -d '[:space:]' < "$WAYVNC_PASSWORD_FILE")
+      if [[ -n "$WAYVNC_PASSWORD" ]]; then
+        ok "Password VNC reutilizada de $WAYVNC_PASSWORD_FILE"
+      fi
+    fi
+    if [[ -z "$WAYVNC_PASSWORD" ]]; then
+      # Password fuerte de 16 chars, solo caracteres URL-safe (sin /, +, =)
+      WAYVNC_PASSWORD=$(openssl rand -base64 24 | tr -d '+/=' | cut -c1-16)
+      mkdir -p "$(dirname "$WAYVNC_PASSWORD_FILE")"
+      chmod 700 "$(dirname "$WAYVNC_PASSWORD_FILE")"
+      printf '%s\n' "$WAYVNC_PASSWORD" > "$WAYVNC_PASSWORD_FILE"
+      chmod 600 "$WAYVNC_PASSWORD_FILE"
+      chown root:root "$WAYVNC_PASSWORD_FILE"
+      ok "Password VNC nueva generada y persistida en $WAYVNC_PASSWORD_FILE"
+    fi
+
+    # 9.3 — Generar TLS cert/key autofirmado para wayvnc (necesario para
+    #       la mayoría de clientes modernos incluido macOS Screen Sharing).
+    WAYVNC_CONFIG_DIR="/home/$TARGET_USER/.config/wayvnc"
+    WAYVNC_KEY="$WAYVNC_CONFIG_DIR/tls_key.pem"
+    WAYVNC_CERT="$WAYVNC_CONFIG_DIR/tls_cert.pem"
+    mkdir -p "$WAYVNC_CONFIG_DIR"
+    if [[ ! -f "$WAYVNC_KEY" || ! -f "$WAYVNC_CERT" ]]; then
+      log "Generando certificado TLS autofirmado para wayvnc..."
+      openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$WAYVNC_KEY" \
+        -out "$WAYVNC_CERT" \
+        -subj "/CN=kiosk-${TS_MAC_SUFFIX:-unknown}" \
+        -days 3650 \
+        >/dev/null 2>&1
+      ok "TLS cert/key generados en $WAYVNC_CONFIG_DIR"
+    else
+      ok "TLS cert/key ya presentes en $WAYVNC_CONFIG_DIR"
+    fi
+
+    # 9.4 — Escribir config wayvnc
+    WAYVNC_CONFIG="$WAYVNC_CONFIG_DIR/config"
+    cat > "$WAYVNC_CONFIG" <<EOF
+address=0.0.0.0
+port=5900
+enable_auth=true
+username=fuelmanager
+password=$WAYVNC_PASSWORD
+private_key_file=$WAYVNC_KEY
+certificate_file=$WAYVNC_CERT
+EOF
+    chmod 600 "$WAYVNC_CONFIG"
+    chown -R "$TARGET_USER":"$TARGET_USER" "$WAYVNC_CONFIG_DIR"
+    ok "Config wayvnc creada: $WAYVNC_CONFIG"
+
+    # 9.5 — Autostart XDG: wayvnc arranca con la sesión Wayfire del usuario.
+    #       wayvnc lee config de ~/.config/wayvnc/config automáticamente.
+    WAYVNC_AUTOSTART_DIR="/home/$TARGET_USER/.config/autostart"
+    WAYVNC_AUTOSTART="$WAYVNC_AUTOSTART_DIR/wayvnc.desktop"
+    mkdir -p "$WAYVNC_AUTOSTART_DIR"
+    cat > "$WAYVNC_AUTOSTART" <<'EOF'
+[Desktop Entry]
+Name=WayVNC
+Comment=VNC server para acceso remoto a la pantalla del kiosko
+Exec=wayvnc
+Type=Application
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+    chown -R "$TARGET_USER":"$TARGET_USER" "$WAYVNC_AUTOSTART_DIR"
+    ok "Autostart wayvnc: $WAYVNC_AUTOSTART"
+    log "wayvnc arrancará la próxima vez que '$TARGET_USER' entre en sesión Wayfire."
+    log "Para arrancarlo ahora sin esperar al reboot:  pkill wayvnc 2>/dev/null; nohup wayvnc >/dev/null 2>&1 &"
+  fi
+else
+  log "wayvnc OMITIDO — requiere Tailscale activo (sin tailnet no hay protección de red para el VNC)"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # Verificación final
 # ───────────────────────────────────────────────────────────────────────────
 
@@ -652,6 +1025,27 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}✓  Install complete.${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
 echo
+
+if command -v tailscale >/dev/null 2>&1; then
+  TS_FINAL_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+  TS_FINAL_HOSTNAME=$(tailscale status --json --self 2>/dev/null \
+    | grep -oE '"HostName":[[:space:]]*"[^"]*"' | head -1 \
+    | sed -E 's/.*"HostName":[[:space:]]*"([^"]*)".*/\1/')
+  if [[ -n "$TS_FINAL_IP" ]]; then
+    echo -e "  ${BLUE}Tailscale${NC}: ${TS_FINAL_HOSTNAME:-?}  (IP: $TS_FINAL_IP)"
+    echo "  SSH desde soporte:  ssh fuelmanager@${TS_FINAL_HOSTNAME:-$TS_FINAL_IP}"
+    if command -v wayvnc >/dev/null 2>&1 && [[ -f /etc/flowmaster/wayvnc-password ]]; then
+      WAYVNC_PASS_OUT=$(tr -d '[:space:]' < /etc/flowmaster/wayvnc-password)
+      echo
+      echo -e "  ${BLUE}VNC (pantalla)${NC}: vnc://${TS_FINAL_HOSTNAME:-$TS_FINAL_IP}:5900"
+      echo "    Usuario:  fuelmanager"
+      echo "    Password: $WAYVNC_PASS_OUT"
+      echo "    (Para recuperarla luego: sudo cat /etc/flowmaster/wayvnc-password)"
+    fi
+    echo
+  fi
+fi
+
 echo "Next steps:"
 echo
 echo -e "  1. ${YELLOW}REBOOT${NC} the Raspberry Pi to apply kernel changes:"
