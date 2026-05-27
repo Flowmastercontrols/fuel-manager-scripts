@@ -34,6 +34,17 @@ If you launch from a terminal opened directly on the Pi's desktop, just `fuelman
 
 Do these steps only **once per Pi**. After this, future updates are pushed remotely from the cloud — you don't need to come back to the terminal.
 
+### Step 0 — Setup de la SD card en Pi Imager
+
+**ANTES** de meter la SD en la Raspberry, al flashear con Pi Imager configura:
+
+- **Username**: por convención usamos `fmcfuelmanager`. Puedes usar otro si el cliente final tiene una preferencia, pero **respétalo a partir de ahí** — todo se configura para ese usuario.
+- **Password**: una fuerte. Guárdala en tu gestor de contraseñas con la entrada `Kiosk <hostname>`. Es la misma password que el equipo de soporte usará para `sudo` por SSH y para conectarse por VNC.
+- **WiFi**: si el kiosko irá por WiFi, configúrala aquí.
+- **SSH**: habilitado.
+
+El script `install-raspberry.sh` detecta automáticamente este usuario (vía `SUDO_USER`) y configura todo para él — autostart, sudoers, paths del kiosko, etc. **No creamos ningún usuario adicional**.
+
 ### Step 1 — Copy this folder to the Pi
 
 Use `scp`, a USB drive, or any method you prefer:
@@ -92,21 +103,22 @@ La auth key se genera en `https://login.tailscale.com/admin/settings/keys` (Reus
 
 #### Qué hace el script
 
-1. **Crea el usuario `fuelmanager`** si no existe — le pide el password interactivamente (necesario para `sudo` desde sesiones Tailscale SSH del equipo de soporte). Si ya existe, no lo toca.
-2. Instala las librerías de runtime (libusb, libsqlite3, libbluetooth3, libgpiod2, libfuse2, etc).
-3. Habilita las interfaces de kernel I2C, SPI y UART.
-4. Añade los overlays UART a `/boot/firmware/config.txt`.
-5. Añade el usuario actual a los grupos hardware (`dialout`, `gpio`, `i2c`, `input`, `video`, etc).
-6. Instala las reglas udev del lector USB HID.
-7. Habilita y configura el servicio Bluetooth para modo BLE peripheral.
-8. Arregla permisos de `/dev/shm` (necesario para el renderer Chromium).
-9. Copia el AppImage a `~/.local/share/FuelManager/` (writable, requerido por electron-updater).
-10. Aplica `setcap cap_net_raw,cap_net_admin+eip` al binario interno extraído.
-11. Crea el launcher `/usr/local/bin/fuelmanager`.
-12. Crea un `.desktop` para el menú de aplicaciones.
-13. Habilita el auto-start en login del usuario actual (XDG autostart).
-14. **(Solo si hay auth key Tailscale)** Instala el agente Tailscale y une el kiosko al tailnet con hostname `kiosk-<6-últimos-hex-MAC-eth0>` y tag `tag:kiosk`. Es **idempotente**: si ya estaba unido, se salta. Persiste la auth key en `/etc/flowmaster/tailscale.key` (0600 root:root) para futuras re-ejecuciones. Tras el primer bulk-download del Fuelmanager, el kiosko se autorenombra a `kiosk-<fm-code>`.
-15. **(Solo si Tailscale se unió correctamente)** Asegura que el `wayvnc` nativo del Pi OS está habilitado (`raspi-config nonint do_vnc 0`). No instalamos nada paralelo — Pi OS ya gestiona wayvnc con sus systemd services (`wayvnc.service` + `wayvnc-control.service`), auth PAM y TLS cert auto-generado. Limpia ficheros residuales de versiones anteriores del script que sí montaban un wayvnc propio.
+El script **no crea ningún usuario** — todo se configura para `$SUDO_USER` (el que lanza el script). El usuario se decide al flashear la SD con Pi Imager (paso 0 arriba).
+
+1. Instala las librerías de runtime (libusb, libsqlite3, libbluetooth3, libgpiod2, libfuse2, etc).
+2. Habilita las interfaces de kernel I2C, SPI y UART.
+3. Añade los overlays UART a `/boot/firmware/config.txt`.
+4. Añade el usuario actual a los grupos hardware (`dialout`, `gpio`, `i2c`, `input`, `video`, etc).
+5. Instala las reglas udev del lector USB HID.
+6. Habilita y configura el servicio Bluetooth para modo BLE peripheral.
+7. Arregla permisos de `/dev/shm` (necesario para el renderer Chromium).
+8. Copia el AppImage a `~/.local/share/FuelManager/` (writable, requerido por electron-updater).
+9. Aplica `setcap cap_net_raw,cap_net_admin+eip` al binario interno extraído.
+10. Crea el launcher `/usr/local/bin/fuelmanager`.
+11. Crea un `.desktop` para el menú de aplicaciones.
+12. Habilita el auto-start en login del usuario actual (XDG autostart).
+13. **(Solo si hay auth key Tailscale)** Instala el agente Tailscale y une el kiosko al tailnet con hostname `kiosk-<6-últimos-hex-MAC-eth0>` y tag `tag:kiosk`. Es **idempotente**: si ya estaba unido, se salta. Persiste la auth key en `/etc/flowmaster/tailscale.key` (0600 root:root) para futuras re-ejecuciones. Tras el primer bulk-download del Fuelmanager, el kiosko se autorenombra a `kiosk-<fm-code>`.
+14. **(Solo si Tailscale se unió correctamente)** Asegura que el `wayvnc` nativo del Pi OS está habilitado (`raspi-config nonint do_vnc 0`). No instalamos nada paralelo — Pi OS ya gestiona wayvnc con sus systemd services (`wayvnc.service` + `wayvnc-control.service`), auth PAM y TLS cert auto-generado.
 
 Takes about 1-2 minutes the first time.
 
@@ -177,10 +189,11 @@ El kiosko expone el wayvnc nativo del Pi OS en el puerto 5900 con auth **PAM + T
 
 - **Hostname:** `kiosk-<hostname>` (visible en panel Tailscale, ej. `kiosk-63cdb5`).
 - **Puerto:** `5900`.
-- **Username:** el usuario con autologin del kiosko:
-  - **Producción** (kioskos flasheados con el imager FuelManager): `fuelmanager`.
-  - **Desarrollo** (Pi flasheado con un usuario distinto, ej. `lucas`, `pi`, `admin`): ese mismo usuario.
-  - Si no sabes cuál: en el kiosko, `loginctl list-sessions` te muestra qué UID tiene `seat0` y qué usuario lo posee.
+- **Username:** el usuario con autologin del kiosko, **el mismo que se configuró al flashear la SD con Pi Imager**:
+  - Convención por defecto: `fmcfuelmanager`.
+  - Pi de desarrollo (flasheada con otro usuario): ese mismo (ej. `lucas`, `pi`).
+  - Cliente con preferencia propia: el que pidió.
+  - Si no sabes cuál es: míralo en el panel SuperAdmin (columna "Remote access" muestra `user: <nombre>` debajo del hostname). O en el kiosko: `loginctl list-sessions` te muestra qué UID tiene `seat0` y `id <uid>` te da el nombre.
 - **Password:** la **password Linux** de ese usuario. La misma que usas para `sudo`. NO hay password VNC separada.
 
 > **Importante**: si intentas conectar como un usuario que no es el del autologin, recibirás un fallo con mensaje `pam_allow_desktopuser ... another user is already using the desktop`. Es comportamiento esperado.

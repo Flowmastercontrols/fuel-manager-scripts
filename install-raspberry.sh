@@ -54,7 +54,6 @@ TARGET_USER="${SUDO_USER:-$USER}"
 APPIMAGE_PATH="${1:-}"
 TAILSCALE_AUTHKEY_ARG="${2:-}"   # opcional: segundo positional arg (puede ser una key tskey-auth-...)
 TAILSCALE_PERSISTED_KEY_PATH="/etc/flowmaster/tailscale.key"
-FUELMANAGER_USERNAME="fuelmanager"
 
 # ───────────────────────────────────────────────────────────────────────────
 # Preflight
@@ -63,66 +62,9 @@ FUELMANAGER_USERNAME="fuelmanager"
 require_root
 
 log "FuelManager Kiosk — production install (user: $TARGET_USER)"
-
-# ───────────────────────────────────────────────────────────────────────────
-# 0c. Asegurar que existe el usuario 'fuelmanager'
-# -----------------------------------------------------------------------------
-# El ACL de Tailscale autoriza SSH al kiosko sólo con `users: ["fuelmanager"]`,
-# así que el equipo de soporte SIEMPRE entra como `fuelmanager`. En la mayoría
-# de Pis recién flasheadas ese es directamente el usuario por defecto del
-# imager. Pero hay Pis (típicamente de desarrollo) donde el usuario es otro
-# (ej. `lucas`); en esos casos creamos `fuelmanager` para que la ACL siga
-# funcionando.
-#
-# Si lo creamos: lo añadimos a los grupos hardware estándar + sudo, y pedimos
-# password interactivamente. El password es necesario para que `sudo X` desde
-# una sesión Tailscale-SSH funcione (Tailscale autentica la sesión sin pass,
-# pero `sudo` sí pide pass — defensa en profundidad).
-#
-# Si NO hay TTY (ej. invocación desde DangerZone), se omite la creación con
-# un warning. Es esperable: en ese modo el kiosko ya está montado y el usuario
-# fuelmanager ya debería existir.
-# ───────────────────────────────────────────────────────────────────────────
-
-ensure_fuelmanager_user() {
-  if id "$FUELMANAGER_USERNAME" >/dev/null 2>&1; then
-    ok "Usuario '$FUELMANAGER_USERNAME' ya existe (no se toca)"
-    return 0
-  fi
-
-  if [[ ! -e /dev/tty ]]; then
-    warn "Usuario '$FUELMANAGER_USERNAME' no existe y no hay TTY — SE OMITE creación."
-    warn "  El equipo de soporte no podrá hacer SSH a este Pi hasta que se cree."
-    return 0
-  fi
-
-  log "Usuario '$FUELMANAGER_USERNAME' no existe — creándolo..."
-  useradd -m -s /bin/bash "$FUELMANAGER_USERNAME"
-
-  # Grupos hardware estándar (mismo set que para TARGET_USER más abajo) + sudo
-  for g in dialout gpio input video audio i2c spi plugdev sudo; do
-    if getent group "$g" >/dev/null 2>&1; then
-      usermod -aG "$g" "$FUELMANAGER_USERNAME"
-    fi
-  done
-  ok "Usuario '$FUELMANAGER_USERNAME' creado + añadido a grupos hardware + sudo"
-
-  echo
-  echo "════════════════════════════════════════════════════════════════"
-  echo " Configura el password para el usuario '$FUELMANAGER_USERNAME'"
-  echo "════════════════════════════════════════════════════════════════"
-  echo " Este password se pide al hacer 'sudo' desde una sesión SSH del"
-  echo " equipo de soporte. Guárdalo en tu gestor de contraseñas."
-  echo
-  if passwd "$FUELMANAGER_USERNAME" < /dev/tty; then
-    ok "Password de '$FUELMANAGER_USERNAME' establecida"
-  else
-    warn "Falló el establecimiento del password — '$FUELMANAGER_USERNAME' existe pero sin password."
-    warn "  'sudo' no funcionará para ese usuario hasta que ejecutes: sudo passwd $FUELMANAGER_USERNAME"
-  fi
-}
-
-ensure_fuelmanager_user
+log "Todo se configura para el usuario actual ($TARGET_USER) — el que vaya a ejecutar"
+log "el kiosko y el que el equipo de soporte usará para SSH/VNC vía Tailscale."
+log "El nombre del usuario lo decide el operario al flashear la SD con Pi Imager."
 
 # ───────────────────────────────────────────────────────────────────────────
 # 0a. Validar que se pasó un AppImage como argumento
