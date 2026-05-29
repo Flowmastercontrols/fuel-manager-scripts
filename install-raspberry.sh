@@ -527,8 +527,20 @@ fi
 # copiar el binario descargado sobre este path y relanzar vía este launcher.
 export APPIMAGE="\$APPIMAGE"
 
+# Redirigir stdout+stderr del kiosko a un log dedicado y rotado, accesible por
+# SSH para diagnóstico remoto. Los console.* del kiosko (BLE, self-heal de
+# setcap, install-update) van aquí; antes solo iban a ~/.xsession-errors, que
+# es frágil y se mezcla con toda la sesión X. El prompt de diagnóstico IA y el
+# soporte deben mirar este fichero.
+KIOSK_LOG_DIR="\$HOME/.config/FuelManager/logs"
+mkdir -p "\$KIOSK_LOG_DIR"
+KIOSK_STDOUT="\$KIOSK_LOG_DIR/kiosk-stdout.log"
+# Rotamos: el log de la sesión anterior pasa a .old y empezamos limpio cada
+# arranque (acota el crecimiento, igual que hace ~/.xsession-errors).
+[ -f "\$KIOSK_STDOUT" ] && mv -f "\$KIOSK_STDOUT" "\$KIOSK_STDOUT.old" 2>/dev/null || true
+
 cd "\$EXTRACT_DIR"
-exec "\$INNER_BIN" --no-sandbox "\$@"
+exec "\$INNER_BIN" --no-sandbox "\$@" >> "\$KIOSK_STDOUT" 2>&1
 EOF
   chmod +x "$launcher"
   ok "Launcher (sin sudo, ejecuta binario interno extraído): $launcher"
