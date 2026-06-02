@@ -539,6 +539,24 @@ KIOSK_STDOUT="\$KIOSK_LOG_DIR/kiosk-stdout.log"
 # arranque (acota el crecimiento, igual que hace ~/.xsession-errors).
 [ -f "\$KIOSK_STDOUT" ] && mv -f "\$KIOSK_STDOUT" "\$KIOSK_STDOUT.old" 2>/dev/null || true
 
+# Self-heal del cap_net_raw: verificar SIEMPRE antes de exec, no solo cuando
+# re-extraemos. Síntoma que cubre: tras un cloud update, el launcher se ejecuta
+# vía app.relaunch desde el proceso Electron padre, heredando no_new_privs=1.
+# En ese contexto el sudo setcap de arriba falla silenciosamente y el binario
+# queda sin cap → BLE roto. Un reboot normal NO re-extraería (extracted/ ya
+# tiene mtime ≥ AppImage) y por tanto NO entraría en el bloque de setcap →
+# BLE seguiría roto tras reboot. Esta verificación final SÍ corre siempre:
+# si en el siguiente reboot (XDG autostart, sin no_new_privs heredado) detecta
+# que falta el cap, lo aplica → BLE se recupera solo, sin reinstall.
+if ! /usr/sbin/getcap "\$INNER_BIN" 2>/dev/null | grep -q cap_net_raw; then
+  echo "[fuelmanager] Binario interno SIN cap_net_raw — aplicando..."
+  if sudo -n /usr/sbin/setcap cap_net_raw,cap_net_admin+eip "\$INNER_BIN" 2>&1; then
+    echo "[fuelmanager] setcap aplicado correctamente."
+  else
+    echo "[fuelmanager] AVISO: setcap falló (probablemente no_new_privs heredado). BLE no funcionará hasta el próximo reboot limpio (XDG autostart sin no_new_privs)."
+  fi
+fi
+
 cd "\$EXTRACT_DIR"
 exec "\$INNER_BIN" --no-sandbox "\$@" >> "\$KIOSK_STDOUT" 2>&1
 EOF
