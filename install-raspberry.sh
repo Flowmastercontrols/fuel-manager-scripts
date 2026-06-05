@@ -67,6 +67,60 @@ log "el kiosko y el que el equipo de soporte usará para SSH/VNC vía Tailscale.
 log "El nombre del usuario lo decide el operario al flashear la SD con Pi Imager."
 
 # ───────────────────────────────────────────────────────────────────────────
+# 0a-bis. Check defensivo del reloj del sistema
+# -----------------------------------------------------------------------------
+# apt rechaza repos cuyo `Date:` en InRelease esté en el futuro respecto al
+# reloj del Pi → si el reloj va atrasado (típico en Pi 5 sin batería RTC tras
+# un apagón, o sin NTP), apt-get falla con "Release file ... is not valid yet"
+# y arruina el install. Detectamos el caso AQUÍ, antes de gastar tiempo en
+# preflight, para que el operario sepa exactamente qué arreglar.
+#
+# El baseline se actualiza ocasionalmente (al menos una vez al año) para que
+# refleje "el script no debería usarse con un reloj anterior a esto".
+# ───────────────────────────────────────────────────────────────────────────
+
+# Baseline: 2026-01-01 00:00:00 UTC. Actualizar al inicio de cada año natural.
+SYSTEM_CLOCK_BASELINE_TS=1767225600
+SYSTEM_CLOCK_BASELINE_HUMAN="2026-01-01"
+NOW_TS=$(date +%s)
+if [[ $NOW_TS -lt $SYSTEM_CLOCK_BASELINE_TS ]]; then
+  fail "Reloj del sistema ATRASADO: $(date)
+
+El reloj parece anterior a $SYSTEM_CLOCK_BASELINE_HUMAN. Eso hará que apt
+rechace los repos Debian con 'Release file is not valid yet' y el install
+fallará.
+
+Causa típica: Pi 5 sin batería de respaldo del RTC (CR2032) tras un apagón,
+o NTP bloqueado/no sincronizado.
+
+Arregla el reloj y vuelve a ejecutar:
+
+  sudo timedatectl set-ntp true
+  sudo systemctl restart systemd-timesyncd
+  sleep 5
+  date    # debería mostrar la fecha correcta
+
+Si la red del cliente bloquea NTP:
+
+  sudo timedatectl set-ntp false
+  sudo timedatectl set-time 'YYYY-MM-DD HH:MM:SS'
+
+Solución de raíz (para evitar reincidir): instalar una batería CR2032 en el
+slot RTC de la Pi 5."
+fi
+
+# Aviso (no fatal) si NTP no está sincronizado aunque la fecha "parezca" OK.
+# Puede que el operario haya puesto la fecha a mano: funcionará, pero el reloj
+# irá desfasándose con el tiempo. Mejor sincronizar.
+if command -v timedatectl >/dev/null 2>&1; then
+  NTP_SYNC=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+  if [[ "$NTP_SYNC" != "yes" ]]; then
+    warn "Reloj actual ($(date '+%Y-%m-%d %H:%M:%S')) aceptado, pero NTP NO está sincronizado."
+    warn "  Si apt falla más adelante, ejecuta: sudo timedatectl set-ntp true && sudo systemctl restart systemd-timesyncd"
+  fi
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # 0a. Validar que se pasó un AppImage como argumento
 # ───────────────────────────────────────────────────────────────────────────
 

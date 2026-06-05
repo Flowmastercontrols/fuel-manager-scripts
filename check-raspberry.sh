@@ -111,6 +111,25 @@ else
   warn "Architecture: $ARCH" "— expected aarch64/arm64 for Pi 5"
 fi
 
+# Reloj del sistema. Si está atrasado, apt falla con "Release file is not
+# valid yet" (típico en Pi 5 sin batería RTC tras un apagón, o sin NTP).
+# Aquí no podemos hacer fail (check es read-only), solo informar fuerte.
+SYSTEM_CLOCK_BASELINE_TS=1767225600   # 2026-01-01 — actualizar cada año
+NOW_TS=$(date +%s)
+CURRENT_DATE_HUMAN=$(date '+%Y-%m-%d %H:%M:%S')
+if [[ $NOW_TS -lt $SYSTEM_CLOCK_BASELINE_TS ]]; then
+  warn "System clock: $CURRENT_DATE_HUMAN" "— el reloj parece anterior a 2026-01-01. apt-get fallará. Arregla con: sudo timedatectl set-ntp true && sudo systemctl restart systemd-timesyncd. Si la red bloquea NTP: sudo timedatectl set-time 'YYYY-MM-DD HH:MM:SS'. Considera instalar batería CR2032 en el slot RTC del Pi 5."
+elif command -v timedatectl >/dev/null 2>&1; then
+  NTP_SYNC=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+  if [[ "$NTP_SYNC" == "yes" ]]; then
+    pass "System clock: $CURRENT_DATE_HUMAN" "— NTP sincronizado"
+  else
+    info "System clock: $CURRENT_DATE_HUMAN" "— reloj aceptado pero NTP NO sincronizado. Sin NTP el reloj se irá desfasando; sincroniza con: sudo timedatectl set-ntp true"
+  fi
+else
+  info "System clock: $CURRENT_DATE_HUMAN" "— timedatectl no disponible para verificar NTP"
+fi
+
 # ───────────────────────────────────────────────────────────────────────────
 header "Runtime libraries (needed by the AppImage at runtime)"
 # ───────────────────────────────────────────────────────────────────────────

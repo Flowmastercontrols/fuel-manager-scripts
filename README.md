@@ -266,15 +266,23 @@ In those cases, repeat the first-time install with the newer AppImage.
 
 The kiosk has a built-in button to run these scripts without SSH. Useful when an operator is on-site and needs to verify the install:
 
-|Button|Script|Risk|When to use|
+|Button|Script|Risk|Estado|
 |------|------|----|-----------|
-|**RUN DIAGNOSTICS**|`check-raspberry.sh`|None (read-only)|Anytime, even mid-fueling. Verifies BLE, UART, I2C, USB, libraries, AppImage state.|
-|**RE-VERIFY CONFIG**|`setup-system.sh`|Low (sudo, idempotent)|After OS update, or to re-apply UART/I2C/SPI overlays + udev rules.|
-|**REINSTALL FROM SCRATCH**|`install-raspberry.sh`|High (kills kiosk)|Only when nobody is fueling. Reinstalls from current AppImage. **DB is preserved** (lives in `~/.config/`, untouched).|
+|**RUN DIAGNOSTICS**|`check-raspberry.sh`|None (read-only)|✅ **Funciona**. Anytime, even mid-fueling. Verifies BLE, UART, I2C, USB, libraries, AppImage state.|
+|**RE-VERIFY CONFIG**|`setup-system.sh`|Low (sudo, idempotent)|❌ **ROTO** desde la UI del kiosko (ver caja abajo). Usar SSH.|
+|**REINSTALL FROM SCRATCH**|`install-raspberry.sh`|High (kills kiosk)|❌ **ROTO** desde la UI del kiosko (ver caja abajo). Usar el botón **"Reinstall"** del SuperAdmin o SSH manual.|
+
+> ⚠️ **Limitación conocida: los scripts con `sudo` no funcionan desde DangerZone**
+>
+> El proceso Electron del kiosko corre con `no_new_privs=1` (lo pone Chromium). Ese flag se hereda por los hijos e impide que `sudo` escale a root → `RE-VERIFY` y `REINSTALL` fallan con `sudo: The "no new privileges" flag is set`. El IPC `run-system-script` lo detecta y devuelve un mensaje claro con el comando SSH equivalente listo para copiar.
+>
+> **`RUN DIAGNOSTICS` no usa sudo y sigue funcionando**.
+>
+> Para reinstalar/re-verificar: usar el botón **"Reinstall"** de la columna "Remote access" del SuperAdmin (genera el comando SSH parametrizado por kiosko), o ejecutar `install-raspberry.sh` manualmente por SSH (donde sudo NO está afectado por `no_new_privs`).
 
 The scripts are **downloaded on the fly** from the public repo `Flowmastercontrols/fuel-manager-scripts` (always the latest version on `main`). No need to update the kiosk to get script updates.
 
-`setup-system.sh` and `install-raspberry.sh` are run via `sudo` without password thanks to the entry in `/etc/sudoers.d/fuelmanager` configured by `install-raspberry.sh`. Scope is strictly limited to `/tmp/fuel-setup-system.sh` and `/tmp/fuel-install-raspberry.sh *`.
+`setup-system.sh` y `install-raspberry.sh` tienen entrada en `/etc/sudoers.d/fuelmanager` con NOPASSWD, pero esa entrada solo es útil cuando los scripts se ejecutan desde un contexto sin `no_new_privs` (sesión SSH, login gráfico). Desde DangerZone no aplica.
 
 ---
 
