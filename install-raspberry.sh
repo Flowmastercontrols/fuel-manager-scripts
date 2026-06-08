@@ -109,14 +109,38 @@ Solución de raíz (para evitar reincidir): instalar una batería CR2032 en el
 slot RTC de la Pi 5."
 fi
 
-# Aviso (no fatal) si NTP no está sincronizado aunque la fecha "parezca" OK.
-# Puede que el operario haya puesto la fecha a mano: funcionará, pero el reloj
-# irá desfasándose con el tiempo. Mejor sincronizar.
+# Garantizar NTP activo y dar margen al primer sync.
+# Pi OS Bookworm trae systemd-timesyncd enabled de fábrica, pero una SD con
+# imagen custom o un operario que tocó timedatectl puede haberlo desactivado.
+# Lo dejamos en estado conocido y, si aún no había sincronizado, esperamos
+# hasta 30s para que el resto del script (apt, descargas) vea hora correcta.
+#
+# No falla nunca: si la red del cliente bloquea UDP/123 a pool.ntp.org, el
+# comando "habilita" pero el sync nunca ocurre — eso es un problema de red,
+# no del script, y el operario ya tiene hora aceptable (gracias al check
+# fatal de arriba) o la puso a mano.
 if command -v timedatectl >/dev/null 2>&1; then
+  log "Verificando sincronización NTP..."
+  if ! timedatectl set-ntp true 2>/dev/null; then
+    warn "No se pudo activar NTP con timedatectl. Continuando con el reloj actual."
+  fi
+
   NTP_SYNC=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
   if [[ "$NTP_SYNC" != "yes" ]]; then
-    warn "Reloj actual ($(date '+%Y-%m-%d %H:%M:%S')) aceptado, pero NTP NO está sincronizado."
-    warn "  Si apt falla más adelante, ejecuta: sudo timedatectl set-ntp true && sudo systemctl restart systemd-timesyncd"
+    log "  NTP activado, esperando primer sync (hasta 30s)..."
+    for _ in $(seq 1 15); do
+      sleep 2
+      NTP_SYNC=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+      if [[ "$NTP_SYNC" == "yes" ]]; then break; fi
+    done
+  fi
+
+  if [[ "$NTP_SYNC" == "yes" ]]; then
+    log "  NTP sincronizado. Hora actual: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+  else
+    warn "Reloj actual ($(date '+%Y-%m-%d %H:%M:%S')) aceptado, pero NTP NO sincroniza."
+    warn "  Probable: la red bloquea UDP/123 a pool.ntp.org o no hay internet."
+    warn "  El install continúa. El reloj se irá desfasando hasta que NTP funcione."
   fi
 fi
 
