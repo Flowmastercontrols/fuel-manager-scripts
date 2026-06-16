@@ -46,6 +46,36 @@ TARGET_USER="${SUDO_USER:-$USER}"
 log "FuelManager — system setup for user '$TARGET_USER'"
 
 # ───────────────────────────────────────────────────────────────────────────
+# 0a-bis. Check defensivo del reloj + garantía NTP
+# -----------------------------------------------------------------------------
+# Mismo bloque que en install-raspberry.sh, compartido via _lib-clock.sh.
+# setup-system no usa apt directamente, pero suele ejecutarse en una SD
+# recién flasheada — el momento exacto donde más probable es que el reloj
+# esté mal. Lo arreglamos AHORA para que cuando luego se corra
+# install-raspberry no haya sorpresas.
+# ───────────────────────────────────────────────────────────────────────────
+
+FUEL_SCRIPTS_REPO_RAW="${FUEL_SCRIPTS_REPO_RAW:-https://raw.githubusercontent.com/Flowmastercontrols/fuel-manager-scripts/main}"
+SCRIPT_DIR_FOR_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR_FOR_LIB=""
+if [[ -n "$SCRIPT_DIR_FOR_LIB" && -f "$SCRIPT_DIR_FOR_LIB/_lib-clock.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR_FOR_LIB/_lib-clock.sh"
+else
+  _TMP_LIB="$(mktemp)"
+  if curl -fsSL "$FUEL_SCRIPTS_REPO_RAW/_lib-clock.sh" -o "$_TMP_LIB" && [[ -s "$_TMP_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$_TMP_LIB"
+    rm -f "$_TMP_LIB"
+  else
+    rm -f "$_TMP_LIB"
+    fail "No se pudo cargar _lib-clock.sh (ni local junto al script ni desde $FUEL_SCRIPTS_REPO_RAW/_lib-clock.sh). ¿Sin internet?"
+  fi
+fi
+
+check_clock_or_fail
+ensure_ntp_synced
+
+# ───────────────────────────────────────────────────────────────────────────
 # 1. Enable kernel interfaces
 # ───────────────────────────────────────────────────────────────────────────
 

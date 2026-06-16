@@ -67,7 +67,7 @@ log "el kiosko y el que el equipo de soporte usará para SSH/VNC vía Tailscale.
 log "El nombre del usuario lo decide el operario al flashear la SD con Pi Imager."
 
 # ───────────────────────────────────────────────────────────────────────────
-# 0a-bis. Check defensivo del reloj del sistema
+# 0a-bis. Check defensivo del reloj + garantía NTP
 # -----------------------------------------------------------------------------
 # apt rechaza repos cuyo `Date:` en InRelease esté en el futuro respecto al
 # reloj del Pi → si el reloj va atrasado (típico en Pi 5 sin batería RTC tras
@@ -75,74 +75,30 @@ log "El nombre del usuario lo decide el operario al flashear la SD con Pi Imager
 # y arruina el install. Detectamos el caso AQUÍ, antes de gastar tiempo en
 # preflight, para que el operario sepa exactamente qué arreglar.
 #
-# El baseline se actualiza ocasionalmente (al menos una vez al año) para que
-# refleje "el script no debería usarse con un reloj anterior a esto".
+# La lógica vive en _lib-clock.sh para que setup-system.sh y este script no
+# diverjan. Cuando el script se ejecuta por la vía habitual (curl ... | sudo
+# bash), el lib NO está al lado en /tmp — lo descargamos del mismo repo.
 # ───────────────────────────────────────────────────────────────────────────
 
-# Baseline: 2026-01-01 00:00:00 UTC. Actualizar al inicio de cada año natural.
-SYSTEM_CLOCK_BASELINE_TS=1767225600
-SYSTEM_CLOCK_BASELINE_HUMAN="2026-01-01"
-NOW_TS=$(date +%s)
-if [[ $NOW_TS -lt $SYSTEM_CLOCK_BASELINE_TS ]]; then
-  fail "Reloj del sistema ATRASADO: $(date)
-
-El reloj parece anterior a $SYSTEM_CLOCK_BASELINE_HUMAN. Eso hará que apt
-rechace los repos Debian con 'Release file is not valid yet' y el install
-fallará.
-
-Causa típica: Pi 5 sin batería de respaldo del RTC (CR2032) tras un apagón,
-o NTP bloqueado/no sincronizado.
-
-Arregla el reloj y vuelve a ejecutar:
-
-  sudo timedatectl set-ntp true
-  sudo systemctl restart systemd-timesyncd
-  sleep 5
-  date    # debería mostrar la fecha correcta
-
-Si la red del cliente bloquea NTP:
-
-  sudo timedatectl set-ntp false
-  sudo timedatectl set-time 'YYYY-MM-DD HH:MM:SS'
-
-Solución de raíz (para evitar reincidir): instalar una batería CR2032 en el
-slot RTC de la Pi 5."
-fi
-
-# Garantizar NTP activo y dar margen al primer sync.
-# Pi OS Bookworm trae systemd-timesyncd enabled de fábrica, pero una SD con
-# imagen custom o un operario que tocó timedatectl puede haberlo desactivado.
-# Lo dejamos en estado conocido y, si aún no había sincronizado, esperamos
-# hasta 30s para que el resto del script (apt, descargas) vea hora correcta.
-#
-# No falla nunca: si la red del cliente bloquea UDP/123 a pool.ntp.org, el
-# comando "habilita" pero el sync nunca ocurre — eso es un problema de red,
-# no del script, y el operario ya tiene hora aceptable (gracias al check
-# fatal de arriba) o la puso a mano.
-if command -v timedatectl >/dev/null 2>&1; then
-  log "Verificando sincronización NTP..."
-  if ! timedatectl set-ntp true 2>/dev/null; then
-    warn "No se pudo activar NTP con timedatectl. Continuando con el reloj actual."
-  fi
-
-  NTP_SYNC=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
-  if [[ "$NTP_SYNC" != "yes" ]]; then
-    log "  NTP activado, esperando primer sync (hasta 30s)..."
-    for _ in $(seq 1 15); do
-      sleep 2
-      NTP_SYNC=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
-      if [[ "$NTP_SYNC" == "yes" ]]; then break; fi
-    done
-  fi
-
-  if [[ "$NTP_SYNC" == "yes" ]]; then
-    log "  NTP sincronizado. Hora actual: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+FUEL_SCRIPTS_REPO_RAW="${FUEL_SCRIPTS_REPO_RAW:-https://raw.githubusercontent.com/Flowmastercontrols/fuel-manager-scripts/main}"
+SCRIPT_DIR_FOR_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR_FOR_LIB=""
+if [[ -n "$SCRIPT_DIR_FOR_LIB" && -f "$SCRIPT_DIR_FOR_LIB/_lib-clock.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR_FOR_LIB/_lib-clock.sh"
+else
+  _TMP_LIB="$(mktemp)"
+  if curl -fsSL "$FUEL_SCRIPTS_REPO_RAW/_lib-clock.sh" -o "$_TMP_LIB" && [[ -s "$_TMP_LIB" ]]; then
+    # shellcheck source=/dev/null
+    source "$_TMP_LIB"
+    rm -f "$_TMP_LIB"
   else
-    warn "Reloj actual ($(date '+%Y-%m-%d %H:%M:%S')) aceptado, pero NTP NO sincroniza."
-    warn "  Probable: la red bloquea UDP/123 a pool.ntp.org o no hay internet."
-    warn "  El install continúa. El reloj se irá desfasando hasta que NTP funcione."
+    rm -f "$_TMP_LIB"
+    fail "No se pudo cargar _lib-clock.sh (ni local junto al script ni desde $FUEL_SCRIPTS_REPO_RAW/_lib-clock.sh). ¿Sin internet?"
   fi
 fi
+
+check_clock_or_fail
+ensure_ntp_synced
 
 # ───────────────────────────────────────────────────────────────────────────
 # 0a. Validar que se pasó un AppImage como argumento
