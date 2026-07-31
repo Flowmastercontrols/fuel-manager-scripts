@@ -263,6 +263,7 @@ apt-get install -y -qq \
   bluetooth \
   libfuse2 \
   i2c-tools \
+  fonts-noto-color-emoji \
   > /dev/null
 
 ok "Runtime libraries installed"
