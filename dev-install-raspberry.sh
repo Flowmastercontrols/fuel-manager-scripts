@@ -139,7 +139,7 @@ echo -e "${GREEN}✓ Development install complete.${NC}"
 echo
 echo "Next steps:"
 echo "  sudo reboot"
-echo "  cd /path/to/kiosko2"
+echo "  cd /path/to/kiosk"
 echo "  npm install        # if not done already"
 echo "  DISPLAY=:0 npm start"
 echo
