@@ -469,20 +469,24 @@ install_appimage() {
   ldconfig
   ok "Library path registered: /etc/ld.so.conf.d/fuelmanager.conf"
 
-  # 6. Sudoers: dos bloques de NOPASSWD muy acotados.
+  # 6. Sudoers: UNA sola entrada NOPASSWD, muy acotada.
   #
-  #    a) setcap al binario interno extraído del AppImage. Necesario porque
-  #       el launcher re-extrae tras cada update remoto y debe re-aplicar
-  #       capabilities (operación que requiere root).
+  #    setcap al binario interno extraído del AppImage. Necesario porque el
+  #    launcher re-extrae tras cada update remoto y debe re-aplicar
+  #    capabilities (operación que requiere root).
   #
-  #    b) Ejecutar los scripts de mantenimiento (setup-system.sh e
-  #       install-raspberry.sh) cuando se disparan desde el botón de
-  #       DangerZone → System Scripts dentro del kiosko. El handler del
-  #       kiosko los descarga del repo público a /tmp/fuel-*.sh y los
-  #       lanza con `sudo -n` — esa entrada permite que no pidan password.
+  #    🔴 Hasta el 2026-09-15 había dos entradas más, para lanzar sin
+  #    contraseña `/bin/bash /tmp/fuel-setup-system.sh` y
+  #    `/tmp/fuel-install-raspberry.sh`. `/tmp` lo escribe cualquiera: quien
+  #    tuviera una consola con este usuario ponía ahí lo que quisiera y lo
+  #    ejecutaba como ROOT (fuel-manager-system#64). Y no le servían a la app:
+  #    Electron corre con `no_new_privs` y `sudo` no escala desde el kiosko
+  #    (ver `run-system-script` en src/main/ipcMain.tsx), así que esos scripts
+  #    ya se lanzaban por SSH, con contraseña. NO volver a añadir una entrada
+  #    NOPASSWD sobre un fichero que pueda escribir un usuario sin privilegios.
   #
-  #    Scope estrictamente acotado: comandos y paths específicos. NO se
-  #    abre `bash` libre, ni se permite ejecutar el AppImage como root.
+  #    Como este bloque reescribe el fichero ENTERO, reinstalar limpia las
+  #    entradas viejas de los kioskos ya instalados.
   local sudoers_file=/etc/sudoers.d/fuelmanager
   cat > "$sudoers_file" <<EOF
 # Permite a $TARGET_USER aplicar setcap al binario interno extraído del
@@ -490,16 +494,9 @@ install_appimage() {
 # tras cada update remoto (electron-updater reemplaza el AppImage; el
 # launcher detecta el cambio, re-extrae, y necesita re-setcap).
 #
-# Adicionalmente, permite ejecutar los scripts de mantenimiento del
-# sistema desde el propio kiosko (DangerZone → System Scripts). Los
-# scripts viven en /tmp/fuel-*.sh — los descarga el handler IPC del
-# repo público fuel-manager-scripts en cada invocación.
-#
-# Scope estrictamente limitado a estos comandos + paths concretos.
+# Scope estrictamente limitado a este comando + path concreto.
 # Generado por install-raspberry.sh — NO EDITAR a mano.
 $TARGET_USER ALL=(ALL) NOPASSWD: /usr/sbin/setcap cap_net_raw\\,cap_net_admin+eip $inner_bin
-$TARGET_USER ALL=(root) NOPASSWD: /bin/bash /tmp/fuel-setup-system.sh
-$TARGET_USER ALL=(root) NOPASSWD: /bin/bash /tmp/fuel-install-raspberry.sh *
 EOF
   chmod 440 "$sudoers_file"
 
