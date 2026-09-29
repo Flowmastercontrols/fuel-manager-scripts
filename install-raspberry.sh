@@ -430,9 +430,14 @@ install_appimage() {
   #      because it's a real ELF on disk, not behind a FUSE mount).
   log "Extracting AppImage to $extract_dir/ ..."
   pushd "$install_dir" >/dev/null
+  rm -rf squashfs-root
   "$installed_appimage" --appimage-extract >/dev/null
+  sync
   rm -rf "$extract_dir"
   mv squashfs-root "$extract_dir"
+  # La marca que el launcher exige para dar la extracción por buena (#108).
+  touch "$extract_dir/.extraction-complete"
+  sync
   popd >/dev/null
   ok "AppImage extracted to: $extract_dir"
 
@@ -528,28 +533,44 @@ EXTRACT_DIR="\$HOME/.local/share/FuelManager/extracted"
 INNER_BIN_RELPATH="$inner_bin_relpath"
 INNER_BIN="\$EXTRACT_DIR/\$INNER_BIN_RELPATH"
 
+# La extracción solo vale si llegó a escribir esta marca, y la marca se escribe
+# DESPUÉS de sync (fuel-manager-system#108). Antes se daba por buena si el
+# binario existía, era ejecutable y era más reciente que la AppImage: un
+# apagón a mitad de --appimage-extract dejaba los ficheros creados pero a
+# 0 bytes, las tres cosas se cumplían, y el kiosko ejecutaba un binario vacío
+# en cada arranque sin volver a extraer nunca.
+COMPLETE_MARK="\$EXTRACT_DIR/.extraction-complete"
+
 needs_extract=0
-if [[ ! -d "\$EXTRACT_DIR" ]] || [[ ! -x "\$INNER_BIN" ]]; then
+if [[ ! -f "\$COMPLETE_MARK" ]] || [[ ! -x "\$INNER_BIN" ]] || [[ ! -s "\$INNER_BIN" ]]; then
   needs_extract=1
-elif [[ "\$APPIMAGE" -nt "\$INNER_BIN" ]]; then
+elif [[ "\$APPIMAGE" -nt "\$COMPLETE_MARK" ]]; then
   needs_extract=1
 fi
 
 if [[ \$needs_extract -eq 1 ]]; then
-  echo "[fuelmanager] AppImage es más reciente que la extracción cacheada — re-extrayendo..."
-  rm -rf "\$EXTRACT_DIR"
+  echo "[fuelmanager] Extracción ausente, incompleta o anterior a la AppImage — re-extrayendo..."
   cd "\$(dirname "\$EXTRACT_DIR")"
+  # Restos de una extracción cortada a medias.
+  rm -rf squashfs-root
   "\$APPIMAGE" --appimage-extract >/dev/null
-  mv squashfs-root extracted
+  # Que el contenido esté en disco ANTES de sustituir la extracción buena.
+  sync
+  rm -rf "\$EXTRACT_DIR"
+  mv squashfs-root "\$(basename "\$EXTRACT_DIR")"
 
-  # Re-aplicar setcap (sudoers permite ESTE comando concreto sin password)
-  if [[ -x "\$INNER_BIN" ]]; then
-    sudo /usr/sbin/setcap cap_net_raw,cap_net_admin+eip "\$INNER_BIN" || \\
-      echo "[fuelmanager] AVISO: setcap falló — BLE puede no funcionar"
-  else
-    echo "[fuelmanager] ERROR: binario interno no encontrado tras re-extraer: \$INNER_BIN"
+  if [[ ! -x "\$INNER_BIN" ]] || [[ ! -s "\$INNER_BIN" ]]; then
+    echo "[fuelmanager] ERROR: binario interno ausente o vacío tras re-extraer: \$INNER_BIN"
     exit 1
   fi
+
+  # Re-aplicar setcap (sudoers permite ESTE comando concreto sin password).
+  # -n: en el arranque no hay nadie para teclear una contraseña.
+  sudo -n /usr/sbin/setcap cap_net_raw,cap_net_admin+eip "\$INNER_BIN" || \\
+    echo "[fuelmanager] AVISO: setcap falló — BLE puede no funcionar"
+
+  touch "\$COMPLETE_MARK"
+  sync
 fi
 
 # Exportar APPIMAGE para que electron-updater sepa que estamos en un AppImage
