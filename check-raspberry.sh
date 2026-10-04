@@ -330,6 +330,57 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
+header "Mandatory system config (NVMe/PCIe power saving, journal)"
+# ───────────────────────────────────────────────────────────────────────────
+
+# Lo mismo que aplica install-raspberry.sh y que la app manda en el ping
+# (system_health.config_checks). La lista vive en _lib-system-config.sh.
+SYSCFG_LIB=""
+if [[ -f "$SCRIPT_DIR/_lib-system-config.sh" ]]; then
+  SYSCFG_LIB="$SCRIPT_DIR/_lib-system-config.sh"
+else
+  SYSCFG_LIB="$(mktemp)"
+  curl -fsSL "${FUEL_SCRIPTS_REPO_RAW:-https://raw.githubusercontent.com/Flowmastercontrols/fuel-manager-scripts/main}/_lib-system-config.sh" \
+    -o "$SYSCFG_LIB" 2>/dev/null || SYSCFG_LIB=""
+fi
+
+if [[ -n "$SYSCFG_LIB" && -s "$SYSCFG_LIB" ]]; then
+  # shellcheck source=/dev/null
+  . "$SYSCFG_LIB"
+  ACTIVE_MISSING="$(missing_kernel_params /proc/cmdline | tr '\n' ' ')"
+  NEXT_MISSING="$(missing_kernel_params "$SYSCFG_CMDLINE_FILE" | tr '\n' ' ')"
+  if [[ -z "$ACTIVE_MISSING" ]]; then
+    pass "Kernel params: ${REQUIRED_KERNEL_PARAMS[*]}" "— NVMe/PCIe power saving off"
+  elif [[ -z "$NEXT_MISSING" ]]; then
+    fail "Kernel params in cmdline.txt but NOT active" "— reboot to apply: sudo reboot"
+  else
+    fail "Missing kernel params: $ACTIVE_MISSING" "— the Pi can hang when idle. Fix: sudo bash setup-system.sh && sudo reboot"
+  fi
+
+  if journal_is_persistent; then
+    pass "Persistent journal" "— logs survive a hang or a power cut"
+  else
+    fail "Journal is volatile" "— after a hang there is no trace of what happened. Fix: sudo bash setup-system.sh"
+  fi
+else
+  warn "_lib-system-config.sh not available" "— cannot check the mandatory system config (no internet?)"
+fi
+
+# El bootloader (EEPROM). Solo informativo: actualizarlo es a mano.
+BL_TS_FILE=/proc/device-tree/chosen/bootloader/build-timestamp
+if [[ -r "$BL_TS_FILE" ]]; then
+  BL_TS=$((16#$(od -An -tx1 "$BL_TS_FILE" | tr -d ' \n')))
+  BL_DATE="$(date -u -d "@$BL_TS" +%Y-%m-%d 2>/dev/null || echo "?")"
+  BL_LATEST="$(ls /usr/lib/firmware/raspberrypi/bootloader-2712/default/ 2>/dev/null \
+    | sed -nE 's/^pieeprom-([0-9]{4}-[0-9]{2}-[0-9]{2})\.bin$/\1/p' | sort | tail -1)"
+  if [[ -n "$BL_LATEST" && "$BL_LATEST" > "$BL_DATE" ]]; then
+    info "Bootloader: $BL_DATE (available: $BL_LATEST)" "— update by hand: sudo rpi-eeprom-update -a && sudo reboot"
+  else
+    info "Bootloader: $BL_DATE" "— up to date with the installed rpi-eeprom package"
+  fi
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 header "Installed kiosk (production)"
 # ───────────────────────────────────────────────────────────────────────────
 

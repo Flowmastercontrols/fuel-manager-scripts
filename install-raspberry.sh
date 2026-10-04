@@ -82,20 +82,28 @@ log "El nombre del usuario lo decide el operario al flashear la SD con Pi Imager
 
 FUEL_SCRIPTS_REPO_RAW="${FUEL_SCRIPTS_REPO_RAW:-https://raw.githubusercontent.com/Flowmastercontrols/fuel-manager-scripts/main}"
 SCRIPT_DIR_FOR_LIB="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR_FOR_LIB=""
-if [[ -n "$SCRIPT_DIR_FOR_LIB" && -f "$SCRIPT_DIR_FOR_LIB/_lib-clock.sh" ]]; then
-  # shellcheck source=/dev/null
-  source "$SCRIPT_DIR_FOR_LIB/_lib-clock.sh"
-else
-  _TMP_LIB="$(mktemp)"
-  if curl -fsSL "$FUEL_SCRIPTS_REPO_RAW/_lib-clock.sh" -o "$_TMP_LIB" && [[ -s "$_TMP_LIB" ]]; then
+# Los libs se buscan junto al script y, si no están (curl ... | sudo bash), se
+# bajan del mismo repo. 🔴 Un lib nuevo hay que copiarlo también al repo
+# público fuel-manager-scripts, o la instalación se para aquí.
+cargar_lib() {
+  local nombre="$1" tmp
+  if [[ -n "$SCRIPT_DIR_FOR_LIB" && -f "$SCRIPT_DIR_FOR_LIB/$nombre" ]]; then
     # shellcheck source=/dev/null
-    source "$_TMP_LIB"
-    rm -f "$_TMP_LIB"
-  else
-    rm -f "$_TMP_LIB"
-    fail "No se pudo cargar _lib-clock.sh (ni local junto al script ni desde $FUEL_SCRIPTS_REPO_RAW/_lib-clock.sh). ¿Sin internet?"
+    source "$SCRIPT_DIR_FOR_LIB/$nombre"
+    return
   fi
-fi
+  tmp="$(mktemp)"
+  if curl -fsSL "$FUEL_SCRIPTS_REPO_RAW/$nombre" -o "$tmp" && [[ -s "$tmp" ]]; then
+    # shellcheck source=/dev/null
+    source "$tmp"
+    rm -f "$tmp"
+  else
+    rm -f "$tmp"
+    fail "No se pudo cargar $nombre (ni local junto al script ni desde $FUEL_SCRIPTS_REPO_RAW/$nombre). ¿Sin internet?"
+  fi
+}
+cargar_lib _lib-clock.sh
+cargar_lib _lib-system-config.sh
 
 check_clock_or_fail
 ensure_ntp_synced
@@ -311,6 +319,19 @@ dtparam=i2c_arm_baudrate=100000
 EOF
   ok "UART overlays added (reboot required)"
 fi
+
+# ───────────────────────────────────────────────────────────────────────────
+# 3-bis. Configuración obligatoria del sistema (fuel-manager-system#117)
+# -----------------------------------------------------------------------------
+# Parámetros del kernel que apagan el ahorro de energía del NVMe/PCIe y journal
+# persistente. Sin lo primero la Pi se cuelga en reposo (kiosk-cccccccc,
+# 28/29-09-2026); sin lo segundo, tras un cuelgue no queda rastro. Detalle en
+# _lib-system-config.sh. La app lo comprueba y lo manda en el ping.
+# ───────────────────────────────────────────────────────────────────────────
+
+log "Configuración obligatoria del sistema (NVMe/PCIe + journal)..."
+ensure_required_kernel_params || [[ $? -eq 10 ]] || warn "No se pudieron poner los parámetros del kernel"
+ensure_persistent_journal || warn "No se pudo dejar el journal persistente"
 
 # ───────────────────────────────────────────────────────────────────────────
 # 4. User groups
