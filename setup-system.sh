@@ -178,6 +178,98 @@ udevadm trigger
 ok "udev rules installed"
 
 # ───────────────────────────────────────────────────────────────────────────
+# 5. Salud del disco (fuel-manager-system#121)
+# -----------------------------------------------------------------------------
+# El desgaste de un NVMe vive en su log SMART, y preguntarlo exige CAP_SYS_ADMIN:
+# comprobado en `nvme_cmd_allowed()` de drivers/nvme/host/ioctl.c, de los
+# comandos de administración solo se permiten sin privilegios unas cuantas
+# `Identify`, y el log es un Get Log Page. Dar permiso de LECTURA sobre
+# /dev/nvme0 con una regla de udev no sirve: deja abrir el fichero y seguir sin
+# poder preguntar.
+#
+# 🔴 Y no se resuelve con `sudo NOPASSWD` ni con `setcap cap_sys_admin+ep` sobre
+# `nvme`: las dos cosas dejan un `nvme format` —o un `nvme sanitize`— a un
+# comando de distancia de cualquiera que llegue al usuario de la aplicación.
+#
+# Así que lo pregunta root, cada cuarto de hora, y deja el JSON en /run para que
+# la aplicación solo lo LEA. Lo que se expone son seis contadores de salud; lo
+# que no se expone es ninguna forma de escribir en el disco.
+#
+# La temperatura NO depende de esto: sale de hwmon sin permisos y llega siempre.
+# ───────────────────────────────────────────────────────────────────────────
+
+log "Salud del disco (volcado del SMART)..."
+
+if ! ls /sys/class/nvme/nvme[0-9]* >/dev/null 2>&1; then
+  warn "No hay ningún NVMe: no se instala el volcado del SMART"
+else
+  if ! command -v nvme >/dev/null 2>&1; then
+    apt-get install -y nvme-cli >/dev/null 2>&1 || warn "No se pudo instalar nvme-cli"
+  fi
+
+  cat > /usr/local/sbin/fmc-disk-health <<'EOF'
+#!/usr/bin/env bash
+# Vuelca el log SMART de cada NVMe donde la aplicación pueda leerlo.
+#
+# Corre como root porque el log SMART exige CAP_SYS_ADMIN. Lo que escribe es
+# solo lectura para todos y vive en tmpfs: se borra en cada arranque.
+set -u
+
+DESTINO=/run/fuel-manager/smart
+install -d -m 0755 "$DESTINO"
+
+for ctrl in /sys/class/nvme/nvme[0-9]*; do
+  [ -e "$ctrl" ] || continue
+  nombre=$(basename "$ctrl")
+
+  # A un fichero temporal y después `mv`, que es atómico dentro del mismo
+  # sistema de ficheros: la aplicación no puede leer nunca un JSON a medias.
+  if nvme smart-log "/dev/$nombre" -o json > "$DESTINO/.$nombre.json" 2>/dev/null; then
+    chmod 0644 "$DESTINO/.$nombre.json"
+    mv "$DESTINO/.$nombre.json" "$DESTINO/$nombre.json"
+  else
+    rm -f "$DESTINO/.$nombre.json"
+  fi
+done
+EOF
+  chmod 0755 /usr/local/sbin/fmc-disk-health
+
+  cat > /etc/systemd/system/fmc-disk-health.service <<'EOF'
+[Unit]
+Description=FuelManager — volcado del log SMART del disco
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fmc-disk-health
+# No necesita más que esto: lee un log y escribe un fichero en /run.
+ProtectHome=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+EOF
+
+  cat > /etc/systemd/system/fmc-disk-health.timer <<'EOF'
+[Unit]
+Description=FuelManager — volcar el SMART del disco cada cuarto de hora
+
+[Timer]
+# Al minuto de arrancar, para que el primer inventario del día ya lo encuentre.
+OnBootSec=1min
+OnUnitActiveSec=15min
+# El desgaste no se mueve en quince minutos: esto es cadencia, no urgencia.
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl enable --now fmc-disk-health.timer >/dev/null 2>&1 \
+    && ok "Volcado del SMART instalado (cada 15 min en /run/fuel-manager/smart)" \
+    || warn "No se pudo activar fmc-disk-health.timer"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # Done
 # ───────────────────────────────────────────────────────────────────────────
 
