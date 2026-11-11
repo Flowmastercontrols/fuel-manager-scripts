@@ -11,7 +11,7 @@
 # What it adds on top of the production install:
 #   • build-essential, python3, pkg-config (to compile native modules)
 #   • -dev headers for native module compilation (libusb, libudev, libsqlite3,
-#     libbluetooth, libgpiod)
+#     libbluetooth)
 #   • Node.js 20 LTS (for npm install + electron-rebuild)
 #   • setcap on the Node.js binary (so dev mode can advertise BLE)
 #   • Optional: runs 'npm install' in the project root
@@ -68,7 +68,7 @@ apt-get install -y -qq \
   libudev-dev \
   libsqlite3-dev \
   libbluetooth-dev \
-  libgpiod-dev \
+  gpiod \
   > /dev/null
 
 # Install fpm (needed by electron-builder to create .deb on ARM64)

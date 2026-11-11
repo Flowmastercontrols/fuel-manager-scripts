@@ -134,21 +134,33 @@ fi
 header "Runtime libraries (needed by the AppImage at runtime)"
 # ───────────────────────────────────────────────────────────────────────────
 
+# "$1" puede ser una lista de nombres equivalentes separados por `|`: de
+# bookworm a trixie se renombró libfuse2 → libfuse2t64 (fuel-manager-system#160). Vale el primero que esté instalado.
 check_pkg() {
-  if dpkg -l "$1" 2>/dev/null | grep -q ^ii; then
-    pass "$1" "$2"
-  else
-    fail "$1 missing" "$2"
-  fi
+  local alternativas p
+  IFS='|' read -r -a alternativas <<< "$1"
+  for p in "${alternativas[@]}"; do
+    if dpkg -l "$p" 2>/dev/null | grep -q ^ii; then
+      pass "$p" "$2"
+      return
+    fi
+  done
+  fail "$1 missing" "$2"
 }
 
 check_pkg "libusb-1.0-0"     "— USB device access (card reader, RFID over USB-serial)"
 check_pkg "libsqlite3-0"     "— local SQLite database (vessels, drivers, transactions)"
 check_pkg "libbluetooth3"    "— Bluetooth stack (BLE advertising for mobile discovery)"
-check_pkg "libgpiod2"        "— GPIO access (physical buttons / switches on the kiosk)"
+check_pkg "gpiod"            "— gpioget/gpiomon: the kiosk reads the physical buttons with them (#164)"
+# La app los lanza; sin `gpiomon` arranca sin botonera.
+if command -v gpiomon >/dev/null 2>&1; then
+  pass "gpiomon" "— $(gpiomon --version 2>/dev/null | head -1)"
+else
+  fail "gpiomon not found" "— GPIO buttons will not work. Install: sudo apt install gpiod"
+fi
 check_pkg "bluez"            "— BlueZ Bluetooth daemon (required by BLE)"
 check_pkg "bluetooth"        "— Bluetooth init scripts / metapackage (installed alongside bluez)"
-check_pkg "libfuse2"         "— FUSE (required to execute AppImage format)"
+check_pkg "libfuse2|libfuse2t64" "— FUSE (required to execute AppImage format)"
 check_pkg "i2c-tools"        "— i2cdetect / i2cget (diagnosing HAT vessel controllers)"
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -566,10 +578,10 @@ cat <<'EOF'
     • libusb-1.0-0       USB device access for card reader / RFID
     • libsqlite3-0       Local SQLite DB (drivers, vessels, transactions)
     • libbluetooth3      BLE peripheral advertising
-    • libgpiod2          GPIO line access (buttons)
+    • gpiod              gpioget/gpiomon: how the kiosk reads the buttons
     • bluez              Bluetooth service daemon
     • bluetooth          Bluetooth init scripts metapackage
-    • libfuse2           AppImage filesystem (needed to launch AppImage)
+    • libfuse2           AppImage filesystem (needed to launch AppImage) — libfuse2t64 on trixie
     • i2c-tools          Diagnostic tools (i2cdetect)
 
   USER PERMISSIONS (the user running the kiosk must be in these groups)

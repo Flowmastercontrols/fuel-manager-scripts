@@ -19,7 +19,7 @@
 #
 # What it does NOT do (handled by install-raspberry.sh):
 #   • Installing the FuelManager app (extracts the AppImage to /opt/FuelManager)
-#   • Installing runtime libraries (apt deps: libusb, libsqlite3, libgpiod2, ...)
+#   • Installing runtime libraries (apt deps: libusb, libsqlite3, gpiod, ...)
 #   • setcap cap_net_raw on the inner Electron binary (required for BLE)
 #   • Bluetooth service enable
 #   • /dev/shm permissions

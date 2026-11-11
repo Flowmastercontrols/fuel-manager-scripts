@@ -105,7 +105,7 @@ La auth key se genera en `https://login.tailscale.com/admin/settings/keys` (Reus
 
 El script **no crea ningún usuario** — todo se configura para `$SUDO_USER` (el que lanza el script). El usuario se decide al flashear la SD con Pi Imager (paso 0 arriba).
 
-1. Instala las librerías de runtime (libusb, libsqlite3, libbluetooth3, libgpiod2, libfuse2, etc).
+1. Instala las librerías de runtime (libusb, libsqlite3, libbluetooth3, libfuse2, etc) y el paquete **`gpiod`**, con el que la app lee la botonera (`gpioget`/`gpiomon`; vale el de bookworm y el de trixie, #164). En trixie `libfuse2` se llama `libfuse2t64` y el script elige el que exista.
 2. Habilita las interfaces de kernel I2C, SPI y UART.
 3. Añade los overlays UART a `/boot/firmware/config.txt`.
 4. Escribe `/etc/apt/apt.conf.d/99fmc-sin-automatico`: el índice de apt se refresca, pero **nada se instala solo**. Ver la nota de abajo.
@@ -203,7 +203,7 @@ El kiosko expone el wayvnc nativo del Pi OS en el puerto 5900 con auth **PAM + T
 
 **Cómo funciona la autenticación:**
 
-- Pi OS usa el módulo PAM `pam_allow_desktopuser` que SOLO permite conectar al **usuario que tiene activa la sesión gráfica** (el del autologin de Wayfire).
+- Pi OS usa el módulo PAM `pam_allow_desktopuser` que SOLO permite conectar al **usuario que tiene activa la sesión gráfica** (el del autologin gráfico). Ojo: solo en versiones de `wayvnc` que traen `/etc/pam.d/wayvnc`; en una Pi sin actualizar (p. ej. `wayvnc 0.9.0~dev`) no existe y entra cualquier usuario local con contraseña (fuel-manager-system#160).
 - Eso significa que las credenciales VNC son las **del sistema Linux** de ese usuario.
 
 **Credenciales:**
@@ -258,8 +258,8 @@ vncviewer kiosk-<hostname>:5900
 
 ### Problemas comunes
 
-- **"Invalid username or password" / `pam_allow_desktopuser ... another user is already using the desktop`**: estás intentando entrar como un usuario que NO es el del autologin gráfico. Cambia al usuario que tiene la sesión Wayfire (`loginctl list-sessions` te lo dice).
-- **"Connection refused"** / **"Operation timed out"**: el kiosko aún no ha entrado en sesión Wayfire (sin sesión gráfica activa, no hay nada que capturar). Espera al autologin o haz reboot. Comprueba en el Pi: `sudo systemctl status wayvnc.service`.
+- **"Invalid username or password" / `pam_allow_desktopuser ... another user is already using the desktop`**: estás intentando entrar como un usuario que NO es el del autologin gráfico. Cambia al usuario que tiene la sesión gráfica (`loginctl list-sessions` te lo dice).
+- **"Connection refused"** / **"Operation timed out"**: el kiosko aún no ha entrado en la sesión gráfica (labwc) (sin sesión gráfica activa, no hay nada que capturar). Espera al autologin o haz reboot. Comprueba en el Pi: `sudo systemctl status wayvnc.service`.
 - **"Certificate not trusted"**: el cert es autofirmado, es normal. Acepta y continúa. Si tu cliente se niega rotundamente, usa TigerVNC que es tolerante.
 - **El kiosko aparece en Tailscale pero el VNC no responde**: verifica que `wayvnc.service` está activo: `ssh <user>@kiosk-... "sudo systemctl status wayvnc"`. Si no lo está: `sudo systemctl enable --now wayvnc.service`.
 
@@ -344,6 +344,21 @@ System-level changes (groups, udev, UART overlays, Bluetooth config) are not rev
 ---
 
 ## Troubleshooting
+
+**🔴 El Wi-Fi no conecta aunque la contraseña es correcta**
+Hay puntos de acceso con los que la Raspberry Pi 5 **no llega ni a asociarse**. Visto
+el 11-11-2026 con un repetidor Xiaomi Wi-Fi 4 en modo **WPA/WPA2 mixto**, mientras un
+router Movistar en **solo WPA2** y el hotspot de un móvil conectaban a la primera
+(fuel-manager-system#161). Se reconoce así:
+
+- Al conectar, el sistema **vuelve a pedir la contraseña**. No es que esté mal escrita:
+  es lo que hace NetworkManager cuando falla la asociación, por la causa que sea.
+- En el journal: `journalctl -u wpa_supplicant | grep ASSOC-REJECT` muestra
+  `CTRL-EVENT-ASSOC-REJECT bssid=00:00:00:00:00:00 status_code=16`, repetido.
+
+**Qué hacer:** en el router o repetidor, poner la seguridad en **solo WPA2 (AES/CCMP)**,
+sin WPA ni TKIP, y volver a intentarlo. Si no se puede cambiar, conectar a otro punto
+de acceso o por cable. Escribir la contraseña otra vez no sirve.
 
 **The kiosk opens with a blank window**
 Run `sudo chmod 1777 /dev/shm` and relaunch. If this happens repeatedly, re-run `install-raspberry.sh`.

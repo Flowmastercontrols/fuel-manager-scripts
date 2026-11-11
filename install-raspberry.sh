@@ -261,20 +261,49 @@ log "Installing runtime system libraries..."
 
 apt-get update -qq
 
+# Primer nombre de la lista que exista en los repositorios de ESTE sistema.
+# De bookworm a trixie cambió libfuse2 → libfuse2t64 (transición t64: misma
+# librería, libfuse.so.2; fuel-manager-system#160). Pedir el nombre viejo en
+# trixie hacía fallar `apt-get install`, y con `set -e` el instalador se paraba
+# aquí.
+paquete_disponible() {
+  local p
+  for p in "$@"; do
+    if apt-cache show "$p" >/dev/null 2>&1; then
+      echo "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PKG_FUSE=$(paquete_disponible libfuse2 libfuse2t64) \
+  || fail "Ni libfuse2 ni libfuse2t64 en los repositorios: sin FUSE no arranca la AppImage"
+log "Paquetes según el sistema: $PKG_FUSE"
+
+# 🔴 La botonera se lee con `gpioget`/`gpiomon` del paquete `gpiod`, que trae
+# también su librería (1.6 en bookworm, 2.x en trixie: la app sabe usar las dos).
+# Sin él, la app arranca sin botonera. Ver src/main/gpiodTools.ts y
+# fuel-manager-system#164 (antes era node-libgpiod, que no funciona en trixie).
+
 apt-get install -y -qq \
   libusb-1.0-0 \
   libudev1 \
   libsqlite3-0 \
   libbluetooth3 \
-  libgpiod2 \
+  gpiod \
   bluez \
   bluetooth \
-  libfuse2 \
+  "$PKG_FUSE" \
   i2c-tools \
   fonts-noto-color-emoji \
   > /dev/null
 
 ok "Runtime libraries installed"
+
+command -v gpiomon >/dev/null 2>&1 \
+  || fail "Instalado gpiod pero no aparece gpiomon: sin él no hay botonera"
+ok "Botonera: $(gpiomon --version 2>/dev/null | head -1)"
 
 # ───────────────────────────────────────────────────────────────────────────
 # 2. Enable kernel interfaces
@@ -723,9 +752,13 @@ Terminal=false
 EOF
   ok "Desktop entry created: $desktop_file"
 
-  # 6. Autostart on login — works for Wayfire (Pi OS Bookworm default) and
-  #    fallback X11 sessions. Wayfire reads ~/.config/wayfire.ini autostart
-  #    sections, but the standard XDG autostart works for both.
+  # 6. Autostart on login (XDG, ~/.config/autostart/).
+  #    🔴 Quien lo lanza NO es el compositor: en Pi OS (labwc desde la imagen de
+  #    2025; antes Wayfire) es `lxsession-xdg-autostart`, y la línea que lo
+  #    arranca está en /etc/xdg/labwc/autostart, que es del paquete
+  #    raspberrypi-ui-mods (el escritorio completo). Visto en kiosk-aaaaaaaa el
+  #    11-11-2026. Sin ese paquete —la imagen mínima de fuel-manager-system#160—
+  #    este .desktop no lo ejecuta nadie y la app no arranca sola.
   local autostart_dir="/home/$TARGET_USER/.config/autostart"
   mkdir -p "$autostart_dir"
   cat > "$autostart_dir/fuelmanager.desktop" <<EOF
