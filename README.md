@@ -108,17 +108,38 @@ El script **no crea ningún usuario** — todo se configura para `$SUDO_USER` (e
 1. Instala las librerías de runtime (libusb, libsqlite3, libbluetooth3, libgpiod2, libfuse2, etc).
 2. Habilita las interfaces de kernel I2C, SPI y UART.
 3. Añade los overlays UART a `/boot/firmware/config.txt`.
-4. Añade el usuario actual a los grupos hardware (`dialout`, `gpio`, `i2c`, `input`, `video`, etc).
-5. Instala las reglas udev del lector USB HID.
-6. Habilita y configura el servicio Bluetooth para modo BLE peripheral.
-7. Arregla permisos de `/dev/shm` (necesario para el renderer Chromium).
-8. Copia el AppImage a `~/.local/share/FuelManager/` (writable, requerido por electron-updater).
-9. Aplica `setcap cap_net_raw,cap_net_admin+eip` al binario interno extraído.
-10. Crea el launcher `/usr/local/bin/fuelmanager`.
-11. Crea un `.desktop` para el menú de aplicaciones.
-12. Habilita el auto-start en login del usuario actual (XDG autostart).
-13. **(Solo si hay auth key Tailscale)** Instala el agente Tailscale y une el kiosko al tailnet con hostname `kiosk-<6-últimos-hex-MAC-eth0>` y tag `tag:kiosk`. Es **idempotente**: si ya estaba unido, se salta. Persiste la auth key en `/etc/flowmaster/tailscale.key` (0600 root:root) para futuras re-ejecuciones. Tras el primer bulk-download del Fuelmanager, el kiosko se autorenombra a `kiosk-<fm-code>`.
-14. **(Solo si Tailscale se unió correctamente)** Asegura que el `wayvnc` nativo del Pi OS está habilitado (`raspi-config nonint do_vnc 0`). No instalamos nada paralelo — Pi OS ya gestiona wayvnc con sus systemd services (`wayvnc.service` + `wayvnc-control.service`), auth PAM y TLS cert auto-generado.
+4. Escribe `/etc/apt/apt.conf.d/99fmc-sin-automatico`: el índice de apt se refresca, pero **nada se instala solo**. Ver la nota de abajo.
+5. Añade el usuario actual a los grupos hardware (`dialout`, `gpio`, `i2c`, `input`, `video`, etc).
+6. Instala las reglas udev del lector USB HID.
+7. Habilita y configura el servicio Bluetooth para modo BLE peripheral.
+8. Arregla permisos de `/dev/shm` (necesario para el renderer Chromium).
+9. Copia el AppImage a `~/.local/share/FuelManager/` (writable, requerido por electron-updater).
+10. Aplica `setcap cap_net_raw,cap_net_admin+eip` al binario interno extraído.
+11. Crea el launcher `/usr/local/bin/fuelmanager`.
+12. Crea un `.desktop` para el menú de aplicaciones.
+13. Habilita el auto-start en login del usuario actual (XDG autostart).
+14. **(Solo si hay auth key Tailscale)** Instala el agente Tailscale y une el kiosko al tailnet con hostname `kiosk-<6-últimos-hex-MAC-eth0>` y tag `tag:kiosk`. Es **idempotente**: si ya estaba unido, se salta. Persiste la auth key en `/etc/flowmaster/tailscale.key` (0600 root:root) para futuras re-ejecuciones. Tras el primer bulk-download del Fuelmanager, el kiosko se autorenombra a `kiosk-<fm-code>`.
+15. **(Solo si Tailscale se unió correctamente)** Asegura que el `wayvnc` nativo del Pi OS está habilitado (`raspi-config nonint do_vnc 0`). No instalamos nada paralelo — Pi OS ya gestiona wayvnc con sus systemd services (`wayvnc.service` + `wayvnc-control.service`), auth PAM y TLS cert auto-generado.
+
+
+> ### 🔴 En un kiosko no se instala nada solo
+>
+> El instalador **no instala `unattended-upgrades`**, y es una decisión, no un
+> olvido. Lo que hace falta en un kiosko es **saber** qué parches hay pendientes;
+> decidir **cuándo** se aplican es de un humano, kiosko a kiosko y nunca en masa.
+> Ese paquete solo sabe hacer lo segundo.
+>
+> Un reinicio inesperado puede caer en mitad de un repostaje; una actualización
+> que rompa el arranque deja la máquina muerta a cientos de kilómetros; y si se
+> actualizan todas a la vez, se rompen todas a la vez.
+>
+> Reparto: la app **mide** (lee el índice de apt y lo manda en el ping), el cloud
+> **avisa**, y `fmc-os-update.sh` **instala** como root cuando —y solo cuando—
+> hay una orden explícita desde el panel. `check-raspberry.sh` comprueba que el
+> fichero sigue puesto, porque una decisión que vive en un fichero suelto se
+> deshace sola en la siguiente reinstalación y nadie se entera.
+>
+> Diseño completo: `cloud/docs/PARCHES-DEL-SISTEMA.md`.
 
 Takes about 1-2 minutes the first time.
 

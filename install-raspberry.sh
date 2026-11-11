@@ -334,6 +334,77 @@ ensure_required_kernel_params || [[ $? -eq 10 ]] || warn "No se pudieron poner l
 ensure_persistent_journal || warn "No se pudo dejar el journal persistente"
 
 # ───────────────────────────────────────────────────────────────────────────
+# 3-ter. Política de apt: medir SÍ, instalar NUNCA por su cuenta
+# -----------------------------------------------------------------------------
+# 🔴 Aquí NO se instala `unattended-upgrades`, y es una decisión, no un olvido.
+#
+# Lo que hace falta en un kiosko es SABER qué parches hay pendientes. Decidir
+# cuándo se aplican es de un humano, kiosko a kiosko y nunca en masa. Son dos
+# cosas distintas, y ese paquete solo sabe hacer la segunda: existe para
+# instalar por su cuenta. Instalado y apagado no aporta nada —el índice de apt
+# ya lo refresca `apt-daily.timer`, que viene de serie— y deja en la máquina un
+# paquete cuyo propósito está prohibido, esperando a que alguien lo encienda sin
+# saber por qué estaba apagado.
+#
+# Por qué un kiosko no puede actualizarse solo, en tres frases: un reinicio
+# inesperado puede caer en mitad de un repostaje; una actualización que rompa el
+# arranque deja la máquina muerta en el sitio de un cliente, a cientos de
+# kilómetros; y si se actualizan todas a la vez, se rompen todas a la vez.
+#
+# Quien mide es la app (`src/main/osUpdates.ts`), que lee el índice de apt y lo
+# manda en el ping; quien avisa es el cloud; quien instala es
+# `scripts/fmc-os-update.sh`, como root y solo cuando hay una orden explícita.
+#
+# Diseño en cloud/docs/PARCHES-DEL-SISTEMA.md.
+# ───────────────────────────────────────────────────────────────────────────
+
+log "Política de apt (medir sí, instalar solo por orden)..."
+
+APT_POLICY=/etc/apt/apt.conf.d/99fmc-sin-automatico
+
+install -d -m 0755 /etc/apt/apt.conf.d
+
+cat > "$APT_POLICY" <<'EOF'
+// FlowMasterControls — política de parches del kiosko.
+//
+//   MEDIR sí. INSTALAR solo por orden explícita de un humano.
+//
+// Un kiosko no se actualiza solo: un reinicio inesperado puede caer en mitad de
+// un repostaje, una actualización que rompa el arranque deja la máquina muerta
+// a cientos de kilómetros, y si se actualizan todas a la vez se rompen todas a
+// la vez. Las órdenes salen del panel del cloud, de una en una.
+//
+// Lo pone scripts/install-raspberry.sh del repo del kiosko.
+// Diseño completo en cloud/docs/PARCHES-DEL-SISTEMA.md.
+
+// El índice SÍ se refresca. De aquí salen las cifras de parches pendientes que
+// el kiosko manda al cloud; sin índice fresco el panel diría que no hay nada
+// pendiente justamente cuando lleva meses habiéndolo.
+APT::Periodic::Update-Package-Lists "1";
+
+// Y nada más. Ni descargar ni instalar por su cuenta. Si alguien instalara
+// `unattended-upgrades` más adelante, este 0 lo deja desactivado.
+APT::Periodic::Download-Upgradeable-Packages "0";
+APT::Periodic::Unattended-Upgrade "0";
+
+// Tirar los .deb viejos de la caché una vez por semana. El disco lleno en una
+// Pi se disfraza de otras diez averías antes de parecer un disco lleno.
+APT::Periodic::AutocleanInterval "7";
+EOF
+
+chmod 0644 "$APT_POLICY"
+ok "Política de apt escrita en $APT_POLICY"
+
+# No se purga: borrar paquetes de una máquina que ya está en campo no es trabajo
+# de un instalador. Pero que no pase desapercibido, porque el fichero de arriba
+# lo deja desactivado y alguien podría creer que está protegido por tenerlo.
+if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
+  warn "unattended-upgrades está INSTALADO en esta máquina."
+  warn "  No forma parte del kiosko a propósito. El fichero de arriba lo deja"
+  warn "  desactivado, pero revísalo: sudo apt-get purge unattended-upgrades"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 # 4. User groups
 # ───────────────────────────────────────────────────────────────────────────
 

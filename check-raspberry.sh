@@ -317,6 +317,34 @@ else
 fi
 
 # ───────────────────────────────────────────────────────────────────────────
+header "Patch policy (nothing on a kiosk updates itself)"
+# ───────────────────────────────────────────────────────────────────────────
+
+# 🔴 Esto comprueba una AUSENCIA deliberada, y por eso tiene que estar aquí: una
+# decisión que solo existe como un fichero suelto se deshace sola en la siguiente
+# reinstalación y nadie se entera. Lo pone install-raspberry.sh (sección 3-ter) y
+# el porqué está en cloud/docs/PARCHES-DEL-SISTEMA.md.
+
+APT_POLICY=/etc/apt/apt.conf.d/99fmc-sin-automatico
+
+if [[ -f "$APT_POLICY" ]]; then
+  if grep -q 'Unattended-Upgrade "0"' "$APT_POLICY" 2>/dev/null \
+     && grep -q 'Update-Package-Lists "1"' "$APT_POLICY" 2>/dev/null; then
+    pass "apt policy: $APT_POLICY" "— refreshes the index (so the cloud sees pending patches) but installs nothing on its own"
+  else
+    fail "apt policy present but incomplete" "— it must set Update-Package-Lists 1 AND Unattended-Upgrade 0. Fix: sudo bash install-raspberry.sh <APPIMAGE>"
+  fi
+else
+  fail "$APT_POLICY missing" "— nothing on this Pi states that it must not update itself. Fix: sudo bash install-raspberry.sh <APPIMAGE>"
+fi
+
+if dpkg -l unattended-upgrades 2>/dev/null | grep -q '^ii'; then
+  warn "unattended-upgrades is installed" "— it is deliberately NOT part of the kiosk install: a kiosk must never reboot mid-fuelling, and a bad upgrade would brick every Pi at once. The file above keeps it disabled. Review: sudo apt-get purge unattended-upgrades"
+else
+  pass "unattended-upgrades not installed" "— on purpose. Patches are measured here and installed only on an explicit order from the cloud panel, one kiosk at a time"
+fi
+
+# ───────────────────────────────────────────────────────────────────────────
 header "Boot configuration"
 # ───────────────────────────────────────────────────────────────────────────
 
